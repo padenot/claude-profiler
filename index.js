@@ -1986,7 +1986,7 @@ function reportSizeProfile(profile, sizeAt) {
 // interactive paths print go to stderr instead.
 async function runJsonMode(command, id, options) {
   const { listSessions } = require('./claude-backend.js');
-  const { listSessions: listCodexSessions } = require('./codex-backend.js');
+  const { listSessionsWithUsage: listCodexSessions } = require('./codex-backend.js');
   const deps = {
     readJsonlFile, readSubagents, sessionTitle, conversationEntries, totalCost
   };
@@ -2003,9 +2003,9 @@ async function runJsonMode(command, id, options) {
   if (command === 'list') {
     // `file` is a path on this machine, which means nothing to the caller and
     // would be misleading in its UI; the id is what it addresses sessions by.
-    const sessions = [...listSessions(deps), ...listCodexSessions()]
+    const sessions = [...listSessions(deps), ...(await listCodexSessions())]
       .sort((a, b) => (b.started || '').localeCompare(a.started || ''))
-      .map(({ file, ...rest }) => rest);
+      .map(({ file, billingThreadIds, parentId, internal, ...rest }) => rest);
     process.stdout.write(JSON.stringify({ sessions }));
     return;
   }
@@ -2171,14 +2171,14 @@ function startIndexServer(profilerOrigin, options = {}, source = localSource()) 
 // server awaits both through the same code.
 function localSource() {
   const { listSessions } = require('./claude-backend.js');
-  const { listSessions: listCodexSessions } = require('./codex-backend.js');
+  const { listSessionsWithUsage: listCodexSessions } = require('./codex-backend.js');
   const deps = {
     readJsonlFile, readSubagents, sessionTitle, conversationEntries, totalCost
   };
 
   return {
     host: null,
-    sessions: async () => [...listSessions(deps), ...listCodexSessions()]
+    sessions: async () => [...listSessions(deps), ...(await listCodexSessions())]
       .sort((a, b) => (b.started || '').localeCompare(a.started || '')),
 
     stamp: async (id) => {
