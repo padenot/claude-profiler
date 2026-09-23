@@ -15,12 +15,14 @@ const { renderTranscript } = require('./transcript.js');
 // Matched in order, so the models that don't follow their family's price come
 // first. Cache prices are derived from the input price rather than listed
 // separately: a 5 minute cache write costs 1.25x, a 1 hour write 2x, and a read
-// 0.1x.
+// 0.1x, except for the models that list their own cache read price.
 const PRICING = [
-  // Claude Fable 5 and Claude Mythos 5
+  { match: /fable-5-1/, input: 10.00, output: 50.00, cacheRead: 0.25 },
+  // Claude Fable 5, Claude Mythos 5 and 5.1
   { match: /fable|mythos/, input: 10.00, output: 50.00 },
   // Claude Opus 4.1 and older, before the Opus price cut
   { match: /opus-4-[01]|opus-4-2025|3-opus/, input: 15.00, output: 75.00 },
+  { match: /opus-5-5/, input: 4.00, output: 20.00, cacheRead: 0.20 },
   // Claude Opus 5, 4.8, 4.7, 4.6 and 4.5
   { match: /opus/, input: 5.00, output: 25.00 },
   // Every Sonnet. Claude Sonnet 5 is $2/$10 until 2026-08-31 under introductory
@@ -32,9 +34,10 @@ const PRICING = [
 ];
 
 // Fast mode is a different price for the same model, so it is matched on the
-// model before the table above. Opus 5 and 4.8 cost twice their standard rate,
-// Opus 4.7 and 4.6 six times it, and no other model offers fast mode.
+// model before the table above. Opus 5.5, 5 and 4.8 cost twice their standard
+// rate, Opus 4.7 and 4.6 six times it, and no other model offers fast mode.
 const FAST_MODE_PRICING = [
+  { match: /opus-5-5/, input: 8.00, output: 40.00, cacheRead: 0.40 },
   { match: /opus-4-8|opus-5/, input: 10.00, output: 50.00 },
   { match: /opus-4-[67]/, input: 30.00, output: 150.00 }
 ];
@@ -126,7 +129,8 @@ function calculateCost(usage, pricing) {
     (cacheWrite5m * CACHE_WRITE_5M_MULTIPLIER + cacheWrite1h * CACHE_WRITE_1H_MULTIPLIER) *
     pricing.input / 1000000;
   const cacheReadCost =
-    (usage.cache_read_input_tokens || 0) * CACHE_READ_MULTIPLIER * pricing.input / 1000000;
+    (usage.cache_read_input_tokens || 0) *
+    (pricing.cacheRead ?? CACHE_READ_MULTIPLIER * pricing.input) / 1000000;
   // A flat fee per search rather than anything token priced, so it rides
   // outside the per-million arithmetic above.
   const webSearchCost =
