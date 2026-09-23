@@ -48,6 +48,11 @@ function shellQuote(value) {
 // stdout is collected as a Buffer because a profile is megabytes of JSON and
 // concatenating it as a string builds it twice.
 function ssh(host, command, { stdin } = {}) {
+  // The remote builds the profile, so it is the one that needs the model
+  // override. Exported rather than prefixed, as some commands are compound.
+  if (process.env.CLAUDE_PROFILER_MODEL) {
+    command = `export CLAUDE_PROFILER_MODEL=${shellQuote(process.env.CLAUDE_PROFILER_MODEL)}; ${command}`;
+  }
   return new Promise((resolve, reject) => {
     const child = spawn('ssh', sshArgs(host, command), {
       stdio: [stdin === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe']

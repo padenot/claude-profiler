@@ -64,6 +64,53 @@ function getPricingForModel(modelId, usage) {
   return PRICING.find(pricing => pricing.match.test(model)) || DEFAULT_PRICING;
 }
 
+// CLAUDE_PROFILER_MODEL='model-to-replace=model-to-use', comma separated,
+// rewrites model ids as the transcripts are read, for both prices and markers.
+// Shorthand names are expanded to full ids.
+function canonicalModel(name) {
+  const id = name.trim().toLowerCase()
+    .replace(/\./g, '-')
+    .replace(/([a-z])(\d)/g, '$1-$2');
+  return id.startsWith('claude-') ? id : `claude-${id}`;
+}
+
+function parseModelOverrides(value) {
+  if (!value) {
+    return [];
+  }
+
+  return value.split(',').map(pair => {
+    const [from, to, extra] = pair.split('=');
+    if (!from?.trim() || !to?.trim() || extra !== undefined) {
+      console.error(`CLAUDE_PROFILER_MODEL: expected model-to-replace=model-to-use, got '${pair}'.`);
+      process.exit(1);
+    }
+    const id = canonicalModel(from);
+    // API errors name the model in parentheses. Printing the replacement there
+    // would claim it failed, so the mention is dropped instead.
+    const mention = new RegExp(
+      ` \\(${id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(-\\d{8})?(\\[[^\\]]*\\])?\\)`, 'g'
+    );
+    return { from: id, to: canonicalModel(to), mention };
+  });
+}
+
+const MODEL_OVERRIDES = parseModelOverrides(process.env.CLAUDE_PROFILER_MODEL);
+
+// Matches the id with or without a date or context suffix, but not as the
+// prefix of a longer id. The date is dropped, the context suffix kept.
+function overrideModel(model) {
+  for (const { from, to } of MODEL_OVERRIDES) {
+    if (model.startsWith(from)) {
+      const rest = model.slice(from.length);
+      if (rest === '' || /^(\[|-\d{8})/.test(rest)) {
+        return to + rest.replace(/^-\d{8}/, '');
+      }
+    }
+  }
+  return model;
+}
+
 function calculateCost(usage, pricing) {
   // The two cache lifetimes are billed differently. Logs that predate the
   // split only have the total, which was a 5 minute write.
@@ -371,7 +418,17 @@ function costWithTokens(cost, tokens, unit = 'tokens') {
 function readJsonlFile(filePath) {
   const content = fs.readFileSync(filePath, 'utf-8');
   const lines = content.trim().split('\n');
-  return lines.filter(line => line.length > 0).map(line => JSON.parse(line));
+  const entries = lines.filter(line => line.length > 0).map(line => JSON.parse(
+    MODEL_OVERRIDES.reduce((text, { mention }) => text.replace(mention, ''), line)
+  ));
+  if (MODEL_OVERRIDES.length) {
+    for (const entry of entries) {
+      if (entry.message?.model) {
+        entry.message.model = overrideModel(entry.message.model);
+      }
+    }
+  }
+  return entries;
 }
 
 // Sub-agent transcripts live next to the main session file, in
