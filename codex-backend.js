@@ -134,6 +134,43 @@ function addModels(into, models) {
   }
 }
 
+// Current rollouts log each message, reasoning summary, tool call and model
+// response twice: as a completed item or token_usage_record, and as the legacy
+// event older rollouts only have. A legacy event is dropped once its modern
+// counterpart appears, from the start of that turn: a session resumed after a
+// Codex upgrade keeps the legacy events written before it.
+const LEGACY_EVENT_ITEMS = {
+  user_message: 'UserMessage',
+  agent_message: 'AgentMessage',
+  agent_reasoning: 'Reasoning',
+  exec_command_end: 'CommandExecution',
+  patch_apply_end: 'FileChange',
+  web_search_end: 'WebSearch',
+  mcp_tool_call_end: 'McpToolCall',
+  token_count: 'token_usage_record'
+};
+
+// Whether an entry is one of the legacy events that has a modern counterpart.
+function legacyDuplicates(entries) {
+  const since = new Map();
+  let turnStart = null;
+  for (const entry of entries) {
+    const at = new Date(entry.timestamp).getTime();
+    if (entry.type === 'turn_context' ||
+        (entry.type === 'event_msg' && entry.payload?.type === 'task_started')) {
+      turnStart = at;
+    }
+    const modern = entry.type === 'token_usage_record' ? entry.type
+      : entry.type === 'event_msg' && entry.payload?.type === 'item_completed'
+        ? entry.payload.item?.type : null;
+    for (const [legacy, item] of Object.entries(LEGACY_EVENT_ITEMS)) {
+      if (item === modern && !since.has(legacy)) since.set(legacy, turnStart ?? at);
+    }
+  }
+  return entry => entry.type === 'event_msg' &&
+    new Date(entry.timestamp).getTime() >= since.get(entry.payload?.type);
+}
+
 // The backend returns all-zero placeholder billing rows for old threads that
 // still have substantial recorded token usage. Zero there means the estimate is
 // unavailable, not that those tokens were free.
@@ -155,9 +192,9 @@ function summarizeSession(file, titles = new Map()) {
   let model = '';
   let active = 0;
   let previous = null;
-  let completedMessages = 0;
-  let legacyMessages = 0;
+  let messages = 0;
   let usage = null;
+  const isDuplicate = legacyDuplicates(entries);
 
   for (const entry of entries) {
     if (entry.timestamp) {
@@ -176,11 +213,11 @@ function summarizeSession(file, titles = new Map()) {
     }
     if (entry.type === 'event_msg' && entry.payload?.type === 'item_completed' &&
         ['UserMessage', 'AgentMessage'].includes(entry.payload.item?.type)) {
-      completedMessages++;
+      messages++;
     }
-    if (entry.type === 'event_msg' &&
+    if (entry.type === 'event_msg' && !isDuplicate(entry) &&
         ['user_message', 'agent_message'].includes(entry.payload?.type)) {
-      legacyMessages++;
+      messages++;
     }
 
     // Both generations are present in current logs. token_usage_record is the
@@ -212,7 +249,7 @@ function summarizeSession(file, titles = new Map()) {
     started: started || stat?.mtime.toISOString() || null,
     ended: ended || started || stat?.mtime.toISOString() || null,
     active,
-    messages: completedMessages || legacyMessages,
+    messages,
     entries: entries.length,
     bytes: stat?.size || 0,
     subagents: 0,
@@ -462,6 +499,7 @@ module.exports = {
   addBilling,
   fetchBilling,
   isBillingPlaceholder,
+  legacyDuplicates,
   summarizeSession,
   sessionTitles,
   sessionTree

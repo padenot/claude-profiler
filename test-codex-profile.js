@@ -105,4 +105,49 @@ assert.deepStrictEqual([untimed.threads[1].registerTime, untimed.threads[1].unre
   [0, 1600]);
 console.log('ok   a thread with no timestamps spans the whole profile');
 
+const doubled = [{ session: session('both', null, 0, 'Both formats'), entries: [
+  entry(0, 'session_meta', { id: 'both' }),
+  entry(100, 'event_msg', { type: 'item_completed', completed_at_ms: base + 100,
+    item: { type: 'UserMessage', content: [{ type: 'text', text: 'Hi' }] } }),
+  entry(100, 'event_msg', { type: 'user_message', message: 'Hi' }),
+  entry(200, 'event_msg', { type: 'item_completed', started_at_ms: base + 150,
+    completed_at_ms: base + 200, item: { type: 'CommandExecution', command: 'ls',
+      status: 'completed' } }),
+  entry(200, 'event_msg', { type: 'exec_command_end', command: 'ls', exit_code: 0 }),
+  entry(300, 'token_usage_record', { response_id: 'r', usage: { total_tokens: 10,
+    input_tokens: 8, output_tokens: 2 }, thread_token_usage: { total_tokens: 10 } }),
+  entry(300, 'event_msg', { type: 'token_count', info: {
+    last_token_usage: { total_tokens: 10, input_tokens: 8, output_tokens: 2 },
+    total_token_usage: { total_tokens: 10 } } })
+] }];
+const doubledProfile = createCodexProfile(doubled, new Map());
+const doubledTypes = doubledProfile.threads[0].markers.data.map(marker => marker.type);
+const count = type => doubledTypes.filter(t => t === type).length;
+assert.deepStrictEqual([count('Text'), count('ToolCall'), count('ModelResponse')], [1, 1, 1]);
+assert.strictEqual(doubledProfile.threads[0].samples.stack.length, 2);
+console.log('ok   a rollout logging both formats counts every event once');
+
+// Legacy events only before a Codex upgrade, both formats after it.
+const resumed = [{ session: session('resumed', null, 0, 'Resumed'), entries: [
+  entry(0, 'session_meta', { id: 'resumed' }),
+  entry(100, 'event_msg', { type: 'user_message', message: 'Old prompt' }),
+  entry(200, 'event_msg', { type: 'token_count', info: {
+    last_token_usage: { total_tokens: 5, input_tokens: 4, output_tokens: 1 },
+    total_token_usage: { total_tokens: 5 } } }),
+  entry(1000, 'turn_context', { turn_id: 'new', model: 'gpt-test' }),
+  entry(1001, 'event_msg', { type: 'user_message', message: 'New prompt' }),
+  entry(1002, 'event_msg', { type: 'item_completed', completed_at_ms: base + 1002,
+    item: { type: 'UserMessage', content: [{ type: 'text', text: 'New prompt' }] } }),
+  entry(1100, 'event_msg', { type: 'token_count', info: {
+    last_token_usage: { total_tokens: 10, input_tokens: 8, output_tokens: 2 },
+    total_token_usage: { total_tokens: 15 } } }),
+  entry(1101, 'token_usage_record', { response_id: 'r', turn_id: 'new', usage: {
+    total_tokens: 10, input_tokens: 8, output_tokens: 2 }, thread_token_usage: { total_tokens: 15 } })
+] }];
+const resumedData = createCodexProfile(resumed, new Map()).threads[0].markers.data;
+assert.deepStrictEqual(resumedData.filter(marker => marker.type === 'Text').map(marker => marker.text),
+  ['Old prompt', 'New prompt']);
+assert.strictEqual(resumedData.filter(marker => marker.type === 'ModelResponse').length, 2);
+console.log('ok   legacy events written before a Codex upgrade are kept');
+
 console.log('\nall passed');

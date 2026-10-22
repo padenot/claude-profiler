@@ -2,7 +2,7 @@
 // rollouts record completed items with exact start/end times; older point
 // events are kept as text markers so their history remains inspectable too.
 
-const { isBillingPlaceholder } = require('./codex-backend.js');
+const { isBillingPlaceholder, legacyDuplicates } = require('./codex-backend.js');
 
 function timestamp(value) {
   if (value === null || value === undefined || value === '') return null;
@@ -77,7 +77,7 @@ function usageSnapshots(entries) {
   return snapshots;
 }
 
-function responseUsage(entries) {
+function responseUsage(entries, isDuplicate) {
   const records = [];
   let lastLegacyTotal = null;
   for (const entry of entries) {
@@ -87,7 +87,7 @@ function responseUsage(entries) {
       records.push({ at, turnId: entry.payload.turn_id,
         responseId: entry.payload.response_id, usage: entry.payload.usage });
     } else if (entry.type === 'event_msg' && entry.payload?.type === 'token_count' &&
-               entry.payload.info?.last_token_usage) {
+               entry.payload.info?.last_token_usage && !isDuplicate(entry)) {
       const total = entry.payload.info.total_token_usage?.total_tokens;
       // Old logs repeat token_count after tool events. A changed cumulative
       // total identifies the actual model response that last_token_usage names.
@@ -101,12 +101,13 @@ function responseUsage(entries) {
   return records;
 }
 
-function transcriptEvents(entries) {
+function transcriptEvents(entries, isDuplicate) {
   const events = [];
   for (const entry of entries) {
     const at = timestamp(entry.timestamp);
     if (at === null || entry.type !== 'event_msg') continue;
     const payload = entry.payload || {};
+    if (isDuplicate(entry)) continue;
     if (payload.type === 'item_completed' && payload.item) {
       const item = payload.item;
       const end = timestamp(payload.completed_at_ms) ?? at;
@@ -391,7 +392,8 @@ function createCodexProfile(tree, billing) {
     // Embed a readable transcript and put every logged contribution on an
     // allocation-like sample stack. This gives Codex the same useful call-tree,
     // flame-graph and source-view surfaces as a Claude profile.
-    const transcript = transcriptEvents(entries);
+    const isDuplicate = legacyDuplicates(entries);
+    const transcript = transcriptEvents(entries, isDuplicate);
     const document = [`# ${session.title}`, `# ${session.cwd || 'Codex'}`, ''];
     for (const event of transcript) {
       event.line = document.length + 1;
@@ -457,6 +459,7 @@ function createCodexProfile(tree, billing) {
       const at = timestamp(entry.timestamp);
       if (at === null || entry.type !== 'event_msg') continue;
       const payload = entry.payload || {};
+      if (isDuplicate(entry)) continue;
       if (payload.type === 'task_started') turnStarts.set(payload.turn_id, at);
       if (payload.type === 'task_complete' || payload.type === 'turn_aborted') {
         const begin = timestamp(payload.started_at ? payload.started_at * 1000 : null) ??
@@ -528,7 +531,7 @@ function createCodexProfile(tree, billing) {
         title: child.session.title, threadId: child.session.id });
     }
 
-    const responses = responseUsage(entries);
+    const responses = responseUsage(entries, isDuplicate);
     const threadCostPoints = costs.get(session.id);
     const costAt = time => [...threadCostPoints].reverse()
       .find(point => point.at <= time)?.cost || 0;
