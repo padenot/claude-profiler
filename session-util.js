@@ -64,6 +64,15 @@ function activity(entries, timeOf = entry => entry.timestamp) {
   return { first, last, active };
 }
 
+// A session without a generated title is named after the first line of its
+// first prompt: long enough to fill the session list's title column, which
+// cuts it to the width it has, and short enough to read whole as its tooltip.
+// Empty when the prompt has no text.
+function promptTitle(text) {
+  const line = String(text).trim().split('\n')[0].replace(/\s+/g, ' ');
+  return line.length > 300 ? `${line.slice(0, 300)}…` : line;
+}
+
 // Most recently active first: the session someone wants to profile is usually
 // the one they were just in, which is not the one that was opened most
 // recently — a session started last week can be the live one.
@@ -86,5 +95,5 @@ function addUsage(into, usage, keys = Object.keys(into)) {
 }
 
 module.exports = {
-  ACTIVE_GAP, statSafe, readJsonlFile, parseJsonl, activity, byLastActive, addUsage, addModels
+  ACTIVE_GAP, statSafe, readJsonlFile, parseJsonl, activity, promptTitle, byLastActive, addUsage, addModels
 };

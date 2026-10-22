@@ -8,7 +8,7 @@ const os = require('os');
 const path = require('path');
 const zlib = require('zlib');
 const {
-  statSafe, parseJsonl, activity, byLastActive, addUsage, addModels
+  statSafe, parseJsonl, activity, promptTitle, byLastActive, addUsage, addModels
 } = require('./session-util.js');
 
 // The canonical generation log names: session.jsonl for format zero, then
@@ -209,17 +209,11 @@ function textBlocks(content) {
   return content.map(block => block?.text || '').filter(Boolean).join('\n');
 }
 
-function titleLine(message) {
-  const firstLine = String(message).trim().split('\n')[0];
-  if (!firstLine) return null;
-  return firstLine.length > 100 ? `${firstLine.slice(0, 99)}…` : firstLine;
-}
-
 function firstUserMessage(entries) {
   const message = entries.find(entry =>
     entry.type === 'user/message' && textBlocks(entry.data?.content)
   );
-  if (message) return titleLine(textBlocks(message.data.content));
+  if (message) return promptTitle(textBlocks(message.data.content));
 
   // A seeded or resumed session can have its first prompt spliced into the
   // inbox rather than recorded as a user message of its own.
@@ -228,7 +222,7 @@ function firstUserMessage(entries) {
     const inserted = entry.data?.inserted || [];
     const sourced = inserted.find(item => item.source?.kind === 'user' &&
       textBlocks(item.content));
-    if (sourced) return titleLine(textBlocks(sourced.content));
+    if (sourced) return promptTitle(textBlocks(sourced.content));
   }
   return null;
 }

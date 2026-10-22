@@ -471,8 +471,14 @@ check('calls without a requestId add no model tokens',
 
 fs.rmSync(root, { recursive: true, force: true });
 
+// An untitled session is named after the first line of its first prompt.
+const { readJsonlFile, promptTitle } = require('./session-util.js');
+check('a prompt title is the first line, its spacing collapsed',
+  promptTitle('  Fix   the thing\nwith more detail'), 'Fix the thing');
+check('a prompt title is cut at 300 characters',
+  promptTitle('x'.repeat(400)), `${'x'.repeat(300)}…`);
+
 // A session being written to can be read halfway through its last line.
-const { readJsonlFile } = require('./session-util.js');
 const partial = path.join(os.tmpdir(), `claude-profiler-partial-${process.pid}.jsonl`);
 fs.writeFileSync(partial, '{"a":1}\n{"b":2}\n{"c":');
 check('a half-written last line is skipped', readJsonlFile(partial), [{ a: 1 }, { b: 2 }]);

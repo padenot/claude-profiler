@@ -6,7 +6,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const {
-  statSafe, readJsonlFile, activity, byLastActive, addUsage, addModels
+  statSafe, readJsonlFile, activity, promptTitle, byLastActive, addUsage, addModels
 } = require('./session-util.js');
 
 const THREAD_USAGE_ENDPOINT =
@@ -69,7 +69,7 @@ function firstUserMessage(entries) {
   const completedText = completed?.payload.item.content?.find(
     block => block.type === 'text'
   )?.text;
-  if (completedText) return titleLine(completedText);
+  if (completedText) return promptTitle(completedText) || 'Codex session';
 
   const event = entries.find(entry =>
     entry.type === 'event_msg' && entry.payload?.type === 'user_message' &&
@@ -77,13 +77,7 @@ function firstUserMessage(entries) {
   );
   if (!event) return 'Codex session';
 
-  return titleLine(event.payload.message);
-}
-
-function titleLine(message) {
-  const firstLine = message.trim().split('\n')[0];
-  if (!firstLine) return 'Codex session';
-  return firstLine.length > 100 ? `${firstLine.slice(0, 99)}…` : firstLine;
+  return promptTitle(event.payload.message) || 'Codex session';
 }
 
 function emptyUsage() {

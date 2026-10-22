@@ -9,7 +9,9 @@ const { spawn } = require('child_process');
 // build the same stacks.
 const { attributeEntry, contextChain, calibrate } = require('./context-size.js');
 const { renderTranscript } = require('./transcript.js');
-const { readJsonlFile: readSessionJsonl, byLastActive } = require('./session-util.js');
+const {
+  readJsonlFile: readSessionJsonl, byLastActive, promptTitle
+} = require('./session-util.js');
 const {
   MESSAGES_CATEGORY, TOOLS_CATEGORY, MODEL_CATEGORY, IDLE_CATEGORY,
   TEXT_SCHEMA, INTERVENTION_SCHEMA, TOOL_CALL_SCHEMA, SUBAGENT_SCHEMA, ACTIVITY_SCHEMA,
@@ -522,8 +524,7 @@ function sessionTitle(jsonlData) {
   );
 
   if (firstPrompt) {
-    const text = entryText(firstPrompt).replace(/\s+/g, ' ');
-    return text.length > 60 ? `${text.slice(0, 60)}…` : text;
+    return promptTitle(entryText(firstPrompt));
   }
 
   return 'Main conversation';
