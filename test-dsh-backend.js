@@ -145,6 +145,33 @@ check('a root that only spawned agents keeps their usage',
   [[QUIET_ID, 15, 1]]);
 fs.rmSync(quietRoot, { recursive: true, force: true });
 
+// A writer that crashed mid-append and was resumed leaves a torn frame with
+// whole frames after it; skippable frames carry no records.
+const resumedRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-backend-test-'));
+const RESUMED_ID = 'session-44444444-4444-4444-8444-444444444444';
+const resumedFile = writeSession(resumedRoot, '--work-project--', RESUMED_ID, [
+  { type: 'session', version: 3, id: RESUMED_ID, createdAt: CREATED, cwd: '/work/project' },
+  { type: 'user/message', seq: 1, time: CREATED + 1000,
+    data: { role: 'user', content: [{ type: 'text', text: 'before' }] } }
+]);
+const skippable = Buffer.alloc(12);
+skippable.writeUInt32LE(0x184D2A53, 0);
+skippable.writeUInt32LE(4, 4);
+fs.appendFileSync(resumedFile, skippable);
+// Incompressible records spanning several blocks, cut partway: the blocks
+// completed before the cut are salvaged, the record they end inside is not.
+const torn = frame(Array.from({ length: 300 }, (_, i) => ({ type: 'user/message', seq: 10 + i,
+  time: CREATED + 2000, data: { role: 'user', content: [{ type: 'text',
+    text: require('crypto').randomBytes(1000).toString('base64') }] } })));
+fs.appendFileSync(resumedFile, torn.subarray(0, Math.floor(torn.length * 0.7)));
+fs.appendFileSync(resumedFile, frame([{ type: 'user/message', seq: 3, time: CREATED + 3000,
+  data: { role: 'user', content: [{ type: 'text', text: 'after' }] } }]));
+const resumed = summarizeSession(resumedFile);
+check('reading resumes after a torn frame in the middle of a log',
+  [resumed.messages > 100, resumed.messages < 300,
+    resumed.ended === new Date(CREATED + 3000).toISOString()], [true, true, true]);
+fs.rmSync(resumedRoot, { recursive: true, force: true });
+
 const tree = sessionTree(ROOT_ID, { root });
 check('a session tree holds the root and its sub-agent',
   tree.map(track => track.session.id).sort(), [ROOT_ID, CHILD_ID].sort());

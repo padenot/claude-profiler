@@ -63,71 +63,58 @@ function findSessionFiles(root = dshDir()) {
 }
 
 const ZSTD_MAGIC = 0xFD2FB528;
+const ZSTD_MAGIC_BYTES = Buffer.from([0x28, 0xB5, 0x2F, 0xFD]);
+// Skippable frames carry metadata rather than content, under any of these 16
+// magic numbers followed by their size.
+const isSkippableMagic = magic => (magic & 0xFFFFFFF0) === 0x184D2A50;
 
-// Locate the structurally complete Zstandard frames in a concatenated stream
-// without decompressing them. A live writer appends whole frames, so EOF can
-// interrupt only the last one; returning its start rather than throwing is what
-// keeps a session being written to readable.
-function scanZstdFrames(buffer) {
-  const frames = [];
-  let offset = 0;
-
-  while (offset < buffer.length) {
-    const start = offset;
-    if (buffer.length - offset < 4) return { frames, tornStart: start };
-    if (buffer.readUInt32LE(offset) !== ZSTD_MAGIC) {
-      throw new Error(`invalid Zstandard frame magic at byte ${offset}`);
-    }
-    offset += 4;
-
-    if (offset === buffer.length) return { frames, tornStart: start };
-    const descriptor = buffer.readUInt8(offset);
-    offset += 1;
-    if ((descriptor & 0x18) !== 0) {
-      throw new Error(`reserved Zstandard frame-header bit at byte ${offset - 1}`);
-    }
-
-    const contentSizeFlag = descriptor >>> 6;
-    const singleSegment = (descriptor & 0x20) !== 0;
-    const checksum = (descriptor & 0x04) !== 0;
-    const dictionaryFlag = descriptor & 0x03;
-    const dictionaryBytes = dictionaryFlag === 3 ? 4 : dictionaryFlag;
-    const contentSizeBytes = contentSizeFlag === 0
-      ? (singleSegment ? 1 : 0)
-      : 1 << contentSizeFlag;
-    const remainingHeaderBytes = (singleSegment ? 0 : 1) + dictionaryBytes + contentSizeBytes;
-    if (buffer.length - offset < remainingHeaderBytes) return { frames, tornStart: start };
-    offset += remainingHeaderBytes;
-
-    for (;;) {
-      if (buffer.length - offset < 3) return { frames, tornStart: start };
-      const blockHeader = buffer.readUIntLE(offset, 3);
-      offset += 3;
-      const lastBlock = (blockHeader & 1) !== 0;
-      const blockType = (blockHeader >>> 1) & 0x03;
-      const blockSize = blockHeader >>> 3;
-      if (blockType === 0x03) {
-        throw new Error(`reserved Zstandard block type at byte ${offset - 3}`);
-      }
-      const payloadBytes = blockType === 0x01 ? 1 : blockSize;
-      if (buffer.length - offset < payloadBytes) return { frames, tornStart: start };
-      offset += payloadBytes;
-      if (lastBlock) break;
-    }
-
-    if (checksum) {
-      if (buffer.length - offset < 4) return { frames, tornStart: start };
-      offset += 4;
-    }
-    frames.push({ start, end: offset });
+// Where the Zstandard frame starting at `start` ends, read from its headers
+// without decompressing it, or null when the buffer ends inside it or what
+// follows cannot be a frame.
+function frameEnd(buffer, start) {
+  let offset = start;
+  if (buffer.length - offset < 8) return null;
+  const magic = buffer.readUInt32LE(offset);
+  if (isSkippableMagic(magic)) {
+    const end = offset + 8 + buffer.readUInt32LE(offset + 4);
+    return end <= buffer.length ? end : null;
   }
+  if (magic !== ZSTD_MAGIC) return null;
+  offset += 4;
 
-  return { frames };
+  const descriptor = buffer.readUInt8(offset);
+  offset += 1;
+  // Bit 3 is reserved and must be zero; bit 4 is unused and is ignored.
+  if ((descriptor & 0x08) !== 0) return null;
+
+  const contentSizeFlag = descriptor >>> 6;
+  const singleSegment = (descriptor & 0x20) !== 0;
+  const checksum = (descriptor & 0x04) !== 0;
+  const dictionaryFlag = descriptor & 0x03;
+  const dictionaryBytes = dictionaryFlag === 3 ? 4 : dictionaryFlag;
+  const contentSizeBytes = contentSizeFlag === 0
+    ? (singleSegment ? 1 : 0)
+    : 1 << contentSizeFlag;
+  offset += (singleSegment ? 0 : 1) + dictionaryBytes + contentSizeBytes;
+
+  for (;;) {
+    if (buffer.length - offset < 3) return null;
+    const blockHeader = buffer.readUIntLE(offset, 3);
+    offset += 3;
+    const blockType = (blockHeader >>> 1) & 0x03;
+    if (blockType === 0x03) return null;
+    offset += blockType === 0x01 ? 1 : blockHeader >>> 3;
+    if (offset > buffer.length) return null;
+    if ((blockHeader & 1) !== 0) break;
+  }
+  if (checksum) offset += 4;
+  return offset <= buffer.length ? offset : null;
 }
 
-// Whatever the interrupted final frame already contains. `ZSTD_e_flush` asks
-// the decoder to stop at the end of the available input instead of demanding a
-// finished frame, and a frame too damaged even for that yields nothing.
+// Whatever an interrupted frame already contains. `ZSTD_e_flush` asks the
+// decoder to stop at the end of the available input instead of demanding a
+// finished frame. Zstandard emits whole blocks, so this recovers the blocks
+// completed before the interruption, which for a small frame is often none.
 function decompressTorn(buffer) {
   try {
     return zlib.zstdDecompressSync(buffer, {
@@ -138,15 +125,41 @@ function decompressTorn(buffer) {
   }
 }
 
+// A concatenated stream of frames. A live writer appends whole frames, so EOF
+// can interrupt the last one; a writer that crashed mid-append and was resumed
+// leaves a torn frame with whole ones after it. Either way the torn frame
+// yields what it can, and reading resumes at the next frame.
 function decompressZstd(buffer) {
   if (typeof zlib.zstdDecompressSync !== 'function') {
     throw new Error('this Node.js cannot read Zstandard session logs');
   }
+  if (buffer.length >= 4 && buffer.readUInt32LE(0) !== ZSTD_MAGIC &&
+      !isSkippableMagic(buffer.readUInt32LE(0))) {
+    throw new Error('not a Zstandard session log');
+  }
 
-  const { frames, tornStart } = scanZstdFrames(buffer);
-  const parts = frames.map(({ start, end }) =>
-    zlib.zstdDecompressSync(buffer.subarray(start, end)));
-  if (tornStart !== undefined) parts.push(decompressTorn(buffer.subarray(tornStart)));
+  const parts = [];
+  let offset = 0;
+  while (offset < buffer.length) {
+    const end = frameEnd(buffer, offset);
+    if (end !== null) {
+      // A skippable frame decompresses to nothing.
+      try {
+        parts.push(zlib.zstdDecompressSync(buffer.subarray(offset, end)));
+        offset = end;
+        continue;
+      } catch {
+        // Structurally plausible but damaged: salvage it as a torn frame.
+      }
+    }
+    const next = buffer.indexOf(ZSTD_MAGIC_BYTES, offset + 1);
+    const stop = next === -1 ? buffer.length : next;
+    // Only the complete records: a record cut in half would otherwise be
+    // joined to the first one of the next frame.
+    const salvaged = decompressTorn(buffer.subarray(offset, stop));
+    parts.push(salvaged.subarray(0, salvaged.lastIndexOf(0x0A) + 1));
+    offset = stop;
+  }
   return Buffer.concat(parts).toString('utf8');
 }
 
