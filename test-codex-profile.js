@@ -99,4 +99,10 @@ assert(!unbilledTypes(placeholder.threads[0]).includes('ThreadCost'));
 assert(!unbilledTypes(placeholder.threads[0]).includes('TotalCost'));
 console.log('ok   an all-zero billing placeholder draws no cost graphs');
 
+const untimed = createCodexProfile([tree[0], { session: session('quiet', 'root', 0, 'Quiet'),
+  entries: [{ type: 'session_meta', payload: { id: 'quiet' } }] }], billing);
+assert.deepStrictEqual([untimed.threads[1].registerTime, untimed.threads[1].unregisterTime],
+  [0, 1600]);
+console.log('ok   a thread with no timestamps spans the whole profile');
+
 console.log('\nall passed');

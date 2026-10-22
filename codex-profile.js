@@ -15,6 +15,20 @@ function durationMs(duration) {
   return (duration.secs || 0) * 1000 + (duration.nanos || 0) / 1000000;
 }
 
+// A loop rather than Math.min(...times): a long session with sub-agents has
+// more timestamps than a spread call can pass as arguments.
+function timeRange(entries) {
+  let start = Infinity;
+  let end = -Infinity;
+  for (const entry of entries) {
+    const at = timestamp(entry.timestamp);
+    if (at === null) continue;
+    if (at < start) start = at;
+    if (at > end) end = at;
+  }
+  return start <= end ? { start, end } : null;
+}
+
 function textBlocks(content) {
   if (typeof content === 'string') return content;
   if (!Array.isArray(content)) return '';
@@ -296,10 +310,12 @@ function createShared(strings, intern) {
 
 function createCodexProfile(tree, billing) {
   if (!tree?.length) throw new Error('No Codex thread found');
-  const allTimes = tree.flatMap(({ entries }) => entries.map(entry => timestamp(entry.timestamp)))
-    .filter(time => time !== null);
-  if (!allTimes.length) throw new Error('No timestamped events found in Codex rollout');
-  const startTime = Math.min(...allTimes);
+  const ranges = tree.map(({ entries }) => timeRange(entries)).filter(Boolean);
+  if (!ranges.length) throw new Error('No timestamped events found in Codex rollout');
+  const startTime = Math.min(...ranges.map(range => range.start));
+  const profileEnd = Math.max(...ranges.map(range => range.end));
+  // A thread with no timestamped entry of its own spans the whole profile.
+  const trackRange = entries => timeRange(entries) || { start: startTime, end: profileEnd };
   const strings = [];
   const stringMap = new Map();
   const intern = value => {
@@ -333,8 +349,8 @@ function createCodexProfile(tree, billing) {
   for (const track of tracks) {
     const billingRow = billed.get(track.session.id);
     if (!billingRow) continue;
-    const times = track.entries.map(entry => timestamp(entry.timestamp)).filter(time => time !== null);
-    const points = costPoints(track.entries, billingRow, Math.min(...times), Math.max(...times));
+    const { start, end } = trackRange(track.entries);
+    const points = costPoints(track.entries, billingRow, start, end);
     costs.set(track.session.id, points);
     let previousCost = 0;
     let previousCredits = 0;
@@ -353,12 +369,9 @@ function createCodexProfile(tree, billing) {
     totalCredits += point.credits;
     return { at: point.at, cost: totalCost, credits: totalCredits };
   });
-  const profileEnd = Math.max(...allTimes);
 
   const threads = tracks.map(({ session, entries }, index) => {
-    const times = entries.map(entry => timestamp(entry.timestamp)).filter(time => time !== null);
-    const trackStart = Math.min(...times);
-    const trackEnd = Math.max(...times);
+    const { start: trackStart, end: trackEnd } = trackRange(entries);
     const markers = { data: [], name: [], startTime: [], endTime: [], phase: [], category: [], length: 0 };
     const add = (name, start, end, category, data) => {
       markers.name.push(intern(name));
