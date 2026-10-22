@@ -252,11 +252,18 @@ function usageSummary(sessions) {
     const entries = Object.entries(session.billingModels || session.models || {});
     const modelEntries = entries.length ? entries : [[session.model || 'Unknown model',
       session.billingUsage || session.usage]];
-    const weights = modelEntries.map(([, modelUsage]) => {
-      const normalized = normalizedUsage(provider, modelUsage);
+    // Models without a cost of their own share what the ones with an exact
+    // cost leave of the session's, in proportion to their tokens.
+    const exact = ([, modelUsage]) => Number.isFinite(modelUsage?.cost);
+    const weights = modelEntries.map(entry => {
+      if (exact(entry)) return 0;
+      const normalized = normalizedUsage(provider, entry[1]);
       return normalized.input + normalized.output;
     });
     const weightTotal = weights.reduce((sum, value) => sum + value, 0);
+    const unattributed = modelEntries.filter(entry => !exact(entry)).length;
+    const remainingCost = Math.max(0, (session.cost ?? 0) -
+      modelEntries.filter(exact).reduce((sum, [, modelUsage]) => sum + modelUsage.cost, 0));
 
     modelEntries.forEach(([model, modelUsage], index) => {
       // A model row is a cost comparison. If this session has no billing data,
@@ -266,10 +273,10 @@ function usageSummary(sessions) {
           (session.cost === null || session.cost === undefined)) return;
       const key = `${provider}:${model}`;
       if (!models.has(key)) models.set(key, emptyTotals(model, provider));
-      const share = weightTotal > 0 ? weights[index] / weightTotal : 1 / modelEntries.length;
+      const share = weightTotal > 0 ? weights[index] / weightTotal : 1 / unattributed;
       const modelCost = Number.isFinite(modelUsage?.cost)
         ? modelUsage.cost
-        : session.cost === null || session.cost === undefined ? null : session.cost * share;
+        : session.cost === null || session.cost === undefined ? null : remainingCost * share;
       addTotals(models.get(key), normalizedUsage(provider, modelUsage), modelCost,
         provider === 'codex' ? modelUsage?.credits : null);
     });

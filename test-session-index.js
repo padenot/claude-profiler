@@ -304,6 +304,16 @@ check('unpriced sessions are excluded consistently from model cost rows', (() =>
   return details.includes('>1,000</div>') && !details.includes('>10,000</div>');
 })(), true);
 
+check('a model without its own cost gets what the others leave of the session cost', (() => {
+  const page = renderPage([{ ...sessions[0], provider: 'codex', cost: 8,
+    usage: { input_tokens: 200, output_tokens: 20 }, models: {
+      'gpt-a': { input_tokens: 100, output_tokens: 10, cost: 5 },
+      'gpt-b': { input_tokens: 100, output_tokens: 10 }
+    } }]);
+  const details = page.match(/<details class="usage-models">([\s\S]*?)<\/details>/)[1];
+  return details.includes('>$5.00</div>') && details.includes('>$3.00</div>');
+})(), true);
+
 check('the per-model usage breakdown is collapsible', (() => {
   const page = renderPage([{ ...sessions[0], model: 'claude-test', cost: 2,
     usage: { input_tokens: 10, output_tokens: 2 },
