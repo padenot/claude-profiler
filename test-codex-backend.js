@@ -4,7 +4,7 @@ const os = require('os');
 const path = require('path');
 const {
   findSessionFiles, listSessions, summarizeSession, sessionTitles,
-  addBilling
+  addBilling, sessionTree
 } = require('./codex-backend.js');
 const { renderPage } = require('./session-index.js');
 
@@ -104,6 +104,28 @@ check('subagent tokens and bytes are included',
   [sessions[0].tokens, sessions[0].subagents, sessions[0].bytes > summary.bytes],
   [120, 1, true]);
 check('the session index title wins', sessions[0].title, 'Indexed title');
+
+// A parent that only spawned an agent, next to an unrelated corrupt rollout.
+const quietRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-backend-test-'));
+const quietDir = path.join(quietRoot, 'sessions', '2026', '01', '03');
+fs.mkdirSync(quietDir, { recursive: true });
+const writeQuiet = (name, lines) => fs.writeFileSync(path.join(quietDir, name), lines.join('\n') + '\n');
+writeQuiet('rollout-parent.jsonl', [JSON.stringify({ timestamp: '2026-01-03T10:00:00.000Z',
+  type: 'session_meta', payload: { id: 'parent', source: 'cli' } })]);
+writeQuiet('rollout-worker.jsonl', [
+  JSON.stringify({ timestamp: '2026-01-03T10:00:01.000Z', type: 'session_meta', payload: {
+    id: 'worker', source: { subagent: { thread_spawn: { parent_thread_id: 'parent' } } } } }),
+  JSON.stringify({ timestamp: '2026-01-03T10:00:02.000Z', type: 'event_msg', payload: {
+    type: 'token_count', info: { total_token_usage: { input_tokens: 30, total_tokens: 40 } } } })
+]);
+writeQuiet('rollout-corrupt.jsonl', ['{"broken', JSON.stringify({ type: 'session_meta' })]);
+const quiet = listSessions({ root: quietRoot });
+check('a root that only spawned agents keeps their usage',
+  quiet.map(session => [session.id, session.tokens, session.subagents]), [['parent', 40, 1]]);
+check('a corrupt rollout does not break an unrelated profile',
+  sessionTree('worker', { root: quietRoot })?.map(track => track.session.id).sort(),
+  ['parent', 'worker']);
+fs.rmSync(quietRoot, { recursive: true, force: true });
 
 const billingCheck = (async () => {
   let requested;

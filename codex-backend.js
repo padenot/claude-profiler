@@ -266,21 +266,25 @@ function summarizeSession(file, titles = new Map()) {
   };
 }
 
-function listSessions({ root = codexDir() } = {}) {
+// A live or corrupt session should not take down the picker, nor the profile
+// of an unrelated thread.
+function summarizeSessions(root) {
   const titles = sessionTitles(root);
   const sessions = [];
   for (const file of findSessionFiles(root)) {
     try {
       sessions.push(summarizeSession(file, titles));
     } catch {
-      // A live or corrupt session should not take down the combined picker.
+      // Skip this rollout.
     }
   }
+  return sessions;
+}
+
+function listSessions({ root = codexDir() } = {}) {
+  const sessions = summarizeSessions(root);
 
   const byId = new Map(sessions.map(session => [session.id, session]));
-  const roots = sessions.filter(session =>
-    !session.parentId && !session.internal && (session.messages > 0 || session.tokens > 0)
-  );
   for (const session of sessions) {
     if (!session.parentId) continue;
 
@@ -305,14 +309,17 @@ function listSessions({ root = codexDir() } = {}) {
     root.billingThreads.push(...session.billingThreads);
   }
 
-  return roots.sort((a, b) => (b.ended || '').localeCompare(a.ended || ''));
+  // Filtered once sub-agent usage is folded in, so that a root which only
+  // spawned agents still carries what they used.
+  return sessions.filter(session =>
+    !session.parentId && !session.internal && (session.messages > 0 || session.tokens > 0)
+  ).sort((a, b) => (b.ended || '').localeCompare(a.ended || ''));
 }
 
 // Read one visible thread and every sub-agent descended from it. Profiles need
 // the individual rollouts rather than the aggregate used by the picker.
 function sessionTree(id, { root = codexDir() } = {}) {
-  const titles = sessionTitles(root);
-  const sessions = findSessionFiles(root).map(file => summarizeSession(file, titles));
+  const sessions = summarizeSessions(root);
   const byId = new Map(sessions.map(session => [session.id, session]));
   const selected = byId.get(id);
   if (!selected) return null;
