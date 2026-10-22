@@ -19,12 +19,29 @@ function statSafe(file) {
 }
 
 // `mapLine` lets a caller rewrite a line's text before it is parsed.
+//
+// Each line is decoded on its own rather than the file as a whole: a single
+// non-ASCII character makes V8 store a whole string as two bytes per
+// character, which makes decoding it, splitting it and parsing it all slower.
+// Decoded separately, only the lines that have one pay for it.
 function readJsonlFile(file, mapLine) {
-  return parseJsonl(fs.readFileSync(file, 'utf8'), mapLine);
+  const buffer = fs.readFileSync(file);
+  const lines = [];
+  let start = 0;
+  while (start < buffer.length) {
+    let end = buffer.indexOf(10, start);
+    if (end === -1) end = buffer.length;
+    if (end > start) lines.push(buffer.toString('utf8', start, end));
+    start = end + 1;
+  }
+  return parseLines(lines, mapLine);
 }
 
-function parseJsonl(text, mapLine = line => line) {
-  const lines = text.split('\n').filter(Boolean);
+function parseJsonl(text, mapLine) {
+  return parseLines(text.split('\n').filter(Boolean), mapLine);
+}
+
+function parseLines(lines, mapLine = line => line) {
   return lines.map((line, i) => {
     try {
       return JSON.parse(mapLine(line));
