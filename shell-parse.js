@@ -333,10 +333,27 @@ function describeStage(words) {
   };
 }
 
+// A profile asks for the same command several times over: once for the call,
+// once for its output, and again in each view that attributes them. Callers
+// only read the result. Emptied rather than evicted when full, which is enough
+// to keep a long-running server from growing without bound.
+const parsed = new Map();
+const PARSED_KEPT = 50000;
+
 // Splits a command string into sequential segments (things run one after
 // another), each with its pipeline stages. `echo` segments are flagged, since
 // their text is the anchor used to split the output.
 function parseCommand(command) {
+  let segments = parsed.get(command);
+  if (!segments) {
+    if (parsed.size >= PARSED_KEPT) parsed.clear();
+    segments = parseUncached(command);
+    parsed.set(command, segments);
+  }
+  return segments;
+}
+
+function parseUncached(command) {
   const tokens = tokenize(command);
   const segments = [];
   let stages = [[]];
