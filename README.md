@@ -378,6 +378,8 @@ to add a profiler button to each session row.
 - `claude-backend.js` / `codex-backend.js` — find and summarize each provider's
   sessions.
 - `codex-profile.js` — builds Codex activity timelines.
+- `timeline-profile.js` — what Claude and Codex timelines share: categories,
+  the shared tables, call stacks, common marker schemas and profile metadata.
 - `session-util.js` — helpers both session backends use.
 - `session-index.js` — renders the shared session-list page.
 - `remote.js` — driving another machine's `claude-profiler` over ssh: probing

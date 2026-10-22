@@ -2,7 +2,14 @@
 // rollouts record completed items with exact start/end times; older point
 // events are kept as text markers so their history remains inspectable too.
 
+const { ACTIVE_GAP } = require('./session-util.js');
 const { isBillingPlaceholder, legacyDuplicates } = require('./codex-backend.js');
+const {
+  OTHER_CATEGORY, MESSAGES_CATEGORY, SUBAGENTS_CATEGORY, TOOLS_CATEGORY,
+  FAILED_TOOLS_CATEGORY, MODEL_CATEGORY, IDLE_CATEGORY,
+  TEXT_SCHEMA, INTERVENTION_SCHEMA, TOOL_CALL_SCHEMA, SUBAGENT_SCHEMA,
+  ACTIVITY_SCHEMA, createTimelineShared, buildTimelineShared, createStackBuilder, profileMeta
+} = require('./timeline-profile.js');
 
 function timestamp(value) {
   if (value === null || value === undefined || value === '') return null;
@@ -113,41 +120,42 @@ function transcriptEvents(entries, isDuplicate) {
       const end = timestamp(payload.completed_at_ms) ?? at;
       let label = item.type;
       let text = itemText(item);
-      let category = 5;
-      if (item.type === 'UserMessage') { label = 'User'; category = 1; }
-      if (item.type === 'AgentMessage') { label = 'Codex'; category = 1; }
+      let category = MODEL_CATEGORY;
+      if (item.type === 'UserMessage') { label = 'User'; category = MESSAGES_CATEGORY; }
+      if (item.type === 'AgentMessage') { label = 'Codex'; category = MESSAGES_CATEGORY; }
       if (['CommandExecution', 'McpToolCall', 'FileChange', 'WebSearch', 'Extension']
         .includes(item.type)) {
-        category = 3;
+        category = TOOLS_CATEGORY;
         const output = item.stdout || item.stderr || item.aggregated_output || item.formatted_output || '';
         text = [toolDetail(item), typeof output === 'string' ? output : JSON.stringify(output)]
           .filter(Boolean).join('\n\n');
       }
       if (item.type === 'ContextCompaction') text = 'Context window compacted.';
       if (item.type === 'SubAgentActivity') {
-        label = 'Subagent'; category = 2;
+        label = 'Subagent'; category = SUBAGENTS_CATEGORY;
         text = [item.kind, item.agent_path, item.agent_thread_id].filter(Boolean).join(' — ');
       }
       if (text) events.push({ at: end, label, text, category });
     } else if (payload.type === 'user_message' || payload.type === 'agent_message') {
       events.push({ at, label: payload.type === 'user_message' ? 'User' : 'Codex',
-        text: String(payload.message || ''), category: 1 });
+        text: String(payload.message || ''), category: MESSAGES_CATEGORY });
     } else if (payload.type === 'agent_reasoning') {
-      events.push({ at, label: 'Reasoning', text: String(payload.text || ''), category: 5 });
+      events.push({ at, label: 'Reasoning', text: String(payload.text || ''),
+        category: MODEL_CATEGORY });
     } else if (['exec_command_end', 'patch_apply_end', 'web_search_end', 'mcp_tool_call_end']
       .includes(payload.type)) {
       const detail = payload.command || payload.query || payload.invocation ||
         (payload.changes ? JSON.stringify(payload.changes) : '');
       const output = payload.stdout || payload.stderr || payload.aggregated_output ||
         payload.formatted_output || payload.result || '';
-      events.push({ at, label: payload.type.replace(/_end$/, ''), category: 3,
+      events.push({ at, label: payload.type.replace(/_end$/, ''), category: TOOLS_CATEGORY,
         text: [typeof detail === 'string' ? detail : JSON.stringify(detail),
           typeof output === 'string' ? output : JSON.stringify(output)].filter(Boolean).join('\n\n') });
     } else if (payload.type === 'context_compacted') {
-      events.push({ at, label: 'Context compaction', category: 5,
+      events.push({ at, label: 'Context compaction', category: MODEL_CATEGORY,
         text: 'Context window compacted.' });
     } else if (payload.type === 'error' || payload.type === 'thread_rolled_back') {
-      events.push({ at, label: 'Intervention', category: 4,
+      events.push({ at, label: 'Intervention', category: FAILED_TOOLS_CATEGORY,
         text: String(payload.message || payload.reason || payload.type) });
     }
   }
@@ -178,33 +186,13 @@ function costPoints(entries, billing, trackStart, trackEnd) {
 
 function markerSchemas() {
   return [
-    { name: 'Text', tooltipLabel: '{marker.name}', tableLabel: '{marker.name}: {marker.data.text}',
-      chartLabel: '{marker.name}', display: ['marker-chart', 'marker-table'],
-      fields: [{ key: 'text', label: 'Content', format: 'string' }] },
+    TEXT_SCHEMA, INTERVENTION_SCHEMA, TOOL_CALL_SCHEMA, SUBAGENT_SCHEMA, ACTIVITY_SCHEMA,
     { name: 'Turn', tooltipLabel: '{marker.name}', tableLabel: '{marker.name}: {marker.data.status}',
       chartLabel: '{marker.name}', display: ['marker-chart', 'marker-table', 'timeline-overview'],
       fields: [
         { key: 'status', label: 'Status', format: 'string' },
         { key: 'model', label: 'Model', format: 'string' },
         { key: 'effort', label: 'Effort', format: 'string' }
-      ] },
-    { name: 'Activity', tooltipLabel: '{marker.name}',
-      tableLabel: '{marker.name}: {marker.data.prompt}', chartLabel: '{marker.data.prompt}',
-      display: ['marker-chart', 'marker-table', 'timeline-overview'], fields: [
-        { key: 'prompt', label: 'Prompt', format: 'string' },
-        { key: 'cost', label: 'Cost ($)', format: 'decimal' }
-      ] },
-    { name: 'Intervention', tooltipLabel: '{marker.name}',
-      tableLabel: '{marker.name}: {marker.data.text}', chartLabel: '{marker.name}',
-      display: ['marker-chart', 'marker-table'], fields: [
-        { key: 'text', label: 'Detail', format: 'string' }
-      ] },
-    { name: 'ToolCall', tooltipLabel: '{marker.name}',
-      tableLabel: '{marker.name} — {marker.data.detail}', chartLabel: '{marker.name}',
-      display: ['marker-chart', 'marker-table'], fields: [
-        { key: 'detail', label: 'Input', format: 'string' },
-        { key: 'status', label: 'Status', format: 'string' },
-        { key: 'outputBytes', label: 'Output size', format: 'bytes' }
       ] },
     { name: 'Reasoning', tooltipLabel: '{marker.name}', tableLabel: '{marker.data.text}',
       chartLabel: '{marker.name}', display: ['marker-chart', 'marker-table'],
@@ -259,54 +247,8 @@ function markerSchemas() {
       tableLabel: '{marker.name}: ${marker.data.cost}', display: [], fields: [
         { key: 'cost', label: 'Total cost ($)', format: 'decimal' },
         { key: 'credits', label: 'Total credits', format: 'decimal' }
-      ], graphs: [{ key: 'cost', color: 'purple', type: 'line' }] },
-    { name: 'Subagent', tooltipLabel: '{marker.data.title}', tableLabel: '{marker.data.title}',
-      chartLabel: '{marker.name}', display: ['marker-chart', 'marker-table'], fields: [
-        { key: 'title', label: 'Thread', format: 'string' },
-        { key: 'threadId', label: 'Thread id', format: 'string' }
-      ] }
+      ], graphs: [{ key: 'cost', color: 'purple', type: 'line' }] }
   ];
-}
-
-const CATEGORIES = [
-  { name: 'Other', color: 'grey', subcategories: ['Other'] },
-  { name: 'Messages', color: 'blue', subcategories: ['Other'] },
-  { name: 'Subagents', color: 'yellow', subcategories: ['Other'] },
-  { name: 'Tools', color: 'green', subcategories: ['Other'] },
-  { name: 'Failed tools', color: 'red', subcategories: ['Other'] },
-  { name: 'Model', color: 'purple', subcategories: ['Other'] },
-  { name: 'Idle', color: 'transparent', subcategories: ['Other'] }
-];
-
-function createShared(strings, intern) {
-  const shared = {
-    stackTable: { length: 0, prefix: [], frame: [] },
-    frameTable: { length: 0, address: [], inlineDepth: [], category: [], subcategory: [],
-      func: [], nativeSymbol: [], innerWindowID: [], originalLocation: [], line: [], column: [] },
-    funcTable: { length: 0, name: [], isJS: [], relevantForJS: [], resource: [], source: [],
-      lineNumber: [], columnNumber: [], originalLocation: [] },
-    resourceTable: { length: 0, lib: [], name: [], host: [], type: [] },
-    nativeSymbols: { length: 0, address: [], functionSize: [], libIndex: [], name: [] },
-    sources: { length: 0, id: [], filename: [], startLine: [], startColumn: [],
-      sourceMapURL: [], content: [] },
-    sourceLocationTable: { source: [], line: [], column: [], length: 0 },
-    funcIndexes: new Map(), frameIndexes: new Map(), stackIndexes: new Map()
-  };
-  shared.registerSource = (name, content) => {
-    const source = shared.sources.length++;
-    shared.sources.id.push(null); shared.sources.filename.push(intern(name));
-    shared.sources.startLine.push(1); shared.sources.startColumn.push(1);
-    shared.sources.sourceMapURL.push(null); shared.sources.content.push(content);
-    const resource = shared.resourceTable.length++;
-    shared.resourceTable.lib.push(null); shared.resourceTable.name.push(intern(name));
-    shared.resourceTable.host.push(null); shared.resourceTable.type.push(5);
-    return { source, resource };
-  };
-  shared.finish = () => ({ stringArray: strings, stackTable: shared.stackTable,
-    frameTable: shared.frameTable, funcTable: shared.funcTable,
-    resourceTable: shared.resourceTable, nativeSymbols: shared.nativeSymbols,
-    sources: shared.sources, sourceLocationTable: shared.sourceLocationTable });
-  return shared;
 }
 
 function createCodexProfile(tree, billing) {
@@ -317,14 +259,7 @@ function createCodexProfile(tree, billing) {
   const profileEnd = Math.max(...ranges.map(range => range.end));
   // A thread with no timestamped entry of its own spans the whole profile.
   const trackRange = entries => timeRange(entries) || { start: startTime, end: profileEnd };
-  const strings = [];
-  const stringMap = new Map();
-  const intern = value => {
-    const text = String(value);
-    if (!stringMap.has(text)) { stringMap.set(text, strings.length); strings.push(text); }
-    return stringMap.get(text);
-  };
-  const shared = createShared(strings, intern);
+  const shared = createTimelineShared();
 
   const tracks = [...tree].sort((a, b) => {
     if (!a.session.parentId) return -1;
@@ -375,7 +310,7 @@ function createCodexProfile(tree, billing) {
     const { start: trackStart, end: trackEnd } = trackRange(entries);
     const markers = { data: [], name: [], startTime: [], endTime: [], phase: [], category: [], length: 0 };
     const add = (name, start, end, category, data) => {
-      markers.name.push(intern(name));
+      markers.name.push(shared.intern(name));
       markers.startTime.push(Math.max(0, start - startTime));
       markers.endTime.push(Math.max(0, end - startTime));
       markers.phase.push(start === end ? 0 : 1);
@@ -385,7 +320,7 @@ function createCodexProfile(tree, billing) {
     };
     const addCostGraph = (points, name, type, end) => {
       points.forEach((point, pointIndex) => add(name, point.at,
-        points[pointIndex + 1]?.at ?? end, 0,
+        points[pointIndex + 1]?.at ?? end, OTHER_CATEGORY,
         { type, cost: point.cost, credits: point.credits }));
     };
 
@@ -401,50 +336,18 @@ function createCodexProfile(tree, billing) {
       document.push(...event.text.split('\n'), '');
     }
     const slug = session.id.replace(/[^A-Za-z0-9-]/g, '').slice(0, 60) || `thread-${index}`;
-    const sourceInfo = shared.registerSource(`${slug}.transcript.txt`, document.join('\n'));
-    const addStack = (name, category, line, prefix = null) => {
-      const funcKey = `${sourceInfo.source}\0${name}\0${line || 0}`;
-      let func = shared.funcIndexes.get(funcKey);
-      if (func === undefined) {
-        func = shared.funcTable.length++;
-        shared.funcIndexes.set(funcKey, func);
-        shared.funcTable.name.push(intern(name)); shared.funcTable.isJS.push(false);
-        shared.funcTable.relevantForJS.push(false); shared.funcTable.resource.push(sourceInfo.resource);
-        shared.funcTable.source.push(sourceInfo.source); shared.funcTable.lineNumber.push(null);
-        shared.funcTable.columnNumber.push(null); shared.funcTable.originalLocation.push(null);
-      }
-      const frameKey = `${func}\0${category}\0${line || 0}`;
-      let frame = shared.frameIndexes.get(frameKey);
-      if (frame === undefined) {
-        frame = shared.frameTable.length++;
-        shared.frameIndexes.set(frameKey, frame);
-        shared.frameTable.address.push(-1); shared.frameTable.inlineDepth.push(0);
-        shared.frameTable.category.push(category); shared.frameTable.subcategory.push(0);
-        shared.frameTable.func.push(func); shared.frameTable.nativeSymbol.push(null);
-        shared.frameTable.innerWindowID.push(0); shared.frameTable.originalLocation.push(null);
-        shared.frameTable.line.push(line || null); shared.frameTable.column.push(null);
-      }
-      const stackKey = `${prefix ?? 'root'}\0${frame}`;
-      let stack = shared.stackIndexes.get(stackKey);
-      if (stack === undefined) {
-        stack = shared.stackTable.length++;
-        shared.stackIndexes.set(stackKey, stack);
-        shared.stackTable.prefix.push(prefix); shared.stackTable.frame.push(frame);
-      }
-      return stack;
-    };
-    const rootStack = addStack('Codex context', 0, null);
+    const sourceIndex = shared.registerSource(`${slug}.transcript.txt`, document.join('\n'));
+    const addStack = createStackBuilder(shared, sourceIndex);
     const sampleRows = transcript.map(event => ({
       time: event.at - startTime,
-      stack: addStack(event.label, event.category, event.line, rootStack),
+      stack: addStack(['Codex context', event.label], event.category, event.line),
       weight: Buffer.byteLength(event.text, 'utf8')
     }));
-    const idleStack = addStack('Idle', 6, null);
-    const IDLE_GAP = 60000;
+    const idleStack = addStack(['Idle'], IDLE_CATEGORY);
     for (let sampleIndex = 1; sampleIndex < transcript.length; sampleIndex++) {
       const before = transcript[sampleIndex - 1].at;
       const after = transcript[sampleIndex].at;
-      if (after - before > IDLE_GAP) {
+      if (after - before > ACTIVE_GAP) {
         sampleRows.push({ time: before - startTime + 1, stack: idleStack, weight: 0 });
         sampleRows.push({ time: after - startTime - 1, stack: idleStack, weight: 0 });
       }
@@ -466,7 +369,7 @@ function createCodexProfile(tree, billing) {
           turnStarts.get(payload.turn_id) ?? at;
         const context = contextByTurn.get(payload.turn_id) || {};
         explicitActivity.push({ start: begin, end: at });
-        add('Turn', begin, at, 5, { type: 'Turn',
+        add('Turn', begin, at, MODEL_CATEGORY, { type: 'Turn',
           status: payload.type === 'task_complete' ? 'complete' : (payload.reason || 'aborted'),
           model: context.model || session.model || 'unknown', effort: context.effort || 'unknown' });
       }
@@ -477,28 +380,29 @@ function createCodexProfile(tree, billing) {
         const begin = timestamp(payload.started_at_ms) ?? Math.max(trackStart, end - durationMs(item.duration));
         if (item.type === 'UserMessage' || item.type === 'AgentMessage') {
           const text = itemText(item);
-          if (text) add(item.type === 'UserMessage' ? 'User' : 'Codex', end, end, 1,
+          if (text) add(item.type === 'UserMessage' ? 'User' : 'Codex', end, end, MESSAGES_CATEGORY,
             { type: 'Text', text });
         } else if (item.type === 'Reasoning') {
-          add('Reasoning', begin, end, 5, { type: 'Reasoning', text: itemText(item) });
+          add('Reasoning', begin, end, MODEL_CATEGORY, { type: 'Reasoning', text: itemText(item) });
         } else if (['CommandExecution', 'McpToolCall', 'FileChange', 'WebSearch', 'Extension']
           .includes(item.type)) {
           const output = item.stdout || item.stderr || item.aggregated_output || item.formatted_output || '';
-          add(item.type, begin, end, item.status && !['completed', 'success'].includes(item.status) ? 4 : 3,
-            { type: 'ToolCall', detail: toolDetail(item).slice(0, 500), status: item.status || 'complete',
+          const failed = item.status && !['completed', 'success'].includes(item.status);
+          add(item.type, begin, end, failed ? FAILED_TOOLS_CATEGORY : TOOLS_CATEGORY,
+            { type: 'ToolCall', name: item.type, detail: toolDetail(item).slice(0, 500), status: item.status || 'complete',
               outputBytes: Buffer.byteLength(typeof output === 'string' ? output : JSON.stringify(output)) });
         } else if (item.type === 'ContextCompaction') {
-          add('Context compaction', end, end, 5,
+          add('Context compaction', end, end, MODEL_CATEGORY,
             { type: 'Text', text: 'Codex compacted the model context window.' });
         } else if (item.type === 'SubAgentActivity') {
-          add('Subagent activity', end, end, 2, { type: 'Text',
+          add('Subagent activity', end, end, SUBAGENTS_CATEGORY, { type: 'Text',
             text: [item.kind, item.agent_path, item.agent_thread_id].filter(Boolean).join(' — ') });
         }
       } else if (payload.type === 'user_message' || payload.type === 'agent_message') {
-        add(payload.type === 'user_message' ? 'User' : 'Codex', at, at, 1,
+        add(payload.type === 'user_message' ? 'User' : 'Codex', at, at, MESSAGES_CATEGORY,
           { type: 'Text', text: String(payload.message || '') });
       } else if (payload.type === 'agent_reasoning') {
-        add('Reasoning', at, at, 5,
+        add('Reasoning', at, at, MODEL_CATEGORY,
           { type: 'Reasoning', text: String(payload.text || '') });
       } else if (['exec_command_end', 'patch_apply_end', 'web_search_end', 'mcp_tool_call_end']
         .includes(payload.type)) {
@@ -511,24 +415,28 @@ function createCodexProfile(tree, billing) {
         const failed = payload.success === false || payload.status === 'failed' ||
           (Number.isInteger(payload.exit_code) && payload.exit_code !== 0);
         add(payload.type.replace(/_end$/, ''), Math.max(trackStart, at - elapsed), at,
-          failed ? 4 : 3, { type: 'ToolCall',
+          failed ? FAILED_TOOLS_CATEGORY : TOOLS_CATEGORY, { type: 'ToolCall',
+            name: payload.type.replace(/_end$/, ''),
             detail: (typeof detail === 'string' ? detail : JSON.stringify(detail)).slice(0, 500),
             status: failed ? 'error' : (payload.status || 'complete'),
             outputBytes: Buffer.byteLength(typeof output === 'string' ? output : JSON.stringify(output)) });
       } else if (payload.type === 'context_compacted') {
-        add('Context compaction', at, at, 5,
+        add('Context compaction', at, at, MODEL_CATEGORY,
           { type: 'Text', text: 'Codex compacted the model context window.' });
       } else if (payload.type === 'error' || payload.type === 'thread_rolled_back') {
-        add(payload.type === 'error' ? 'Error' : 'Thread rolled back', at, at, 4,
-          { type: 'Intervention', text: String(payload.message || payload.reason || payload.type) });
+        add(payload.type === 'error' ? 'Error' : 'Thread rolled back', at, at, FAILED_TOOLS_CATEGORY,
+          { type: 'Intervention', kind: payload.type === 'error' ? 'Error' : 'Thread rolled back',
+            text: String(payload.message || payload.reason || payload.type) });
       }
     }
 
     for (const child of tracks.filter(track => track.session.parentId === session.id)) {
       const childStart = timestamp(child.session.started) ?? trackStart;
       const childEnd = timestamp(child.session.ended) ?? childStart;
-      add('Subagent', childStart, childEnd, 2, { type: 'Subagent',
-        title: child.session.title, threadId: child.session.id });
+      add('Subagent', childStart, childEnd, SUBAGENTS_CATEGORY, { type: 'Subagent',
+        // Like a Claude sub-agent with no type recorded: the rollout names none.
+        agentType: 'agent', description: child.session.title, agentId: child.session.id,
+        cost: costs.get(child.session.id)?.at(-1).cost });
     }
 
     const responses = responseUsage(entries, isDuplicate);
@@ -549,21 +457,21 @@ function createCodexProfile(tree, billing) {
       const context = contextByTurn.get(response.turnId) ||
         [...contexts].reverse().find(candidate => candidate.at <= response.at)?.payload || {};
       const usage = response.usage;
-      add(context.model || session.model || 'Model', responseStart, response.at, 5, {
+      add(context.model || session.model || 'Model', responseStart, response.at, MODEL_CATEGORY, {
         type: 'ModelResponse', model: context.model || session.model || 'unknown',
         effort: context.effort || 'unknown', inputTokens: usage.input_tokens || 0,
         cachedInputTokens: usage.cached_input_tokens || 0,
         outputTokens: usage.output_tokens || 0,
         reasoningTokens: usage.reasoning_output_tokens || 0
       });
-      add('Context Size', response.at, next, 1, { type: 'ContextSize',
+      add('Context Size', response.at, next, MESSAGES_CATEGORY, { type: 'ContextSize',
         tokens: usage.input_tokens || 0,
         cachedTokens: usage.cached_input_tokens || 0,
         uncachedTokens: Math.max(0, (usage.input_tokens || 0) - (usage.cached_input_tokens || 0)) });
-      add('Output Tokens', responseStart, response.at, 5, { type: 'OutputTokens',
+      add('Output Tokens', responseStart, response.at, MODEL_CATEGORY, { type: 'OutputTokens',
         tokens: usage.output_tokens || 0,
         reasoningTokens: usage.reasoning_output_tokens || 0 });
-      if (threadCostPoints) add('Response Cost ($)', responseStart, response.at, 5, {
+      if (threadCostPoints) add('Response Cost ($)', responseStart, response.at, MODEL_CATEGORY, {
         type: 'ResponseCost',
         cost: Math.max(0, costAt(response.at) - costAt(previous)),
         inputTokens: usage.input_tokens || 0,
@@ -580,7 +488,7 @@ function createCodexProfile(tree, billing) {
       if (spans.length === 0) {
         for (const event of transcript) {
           const previous = spans.at(-1);
-          if (!previous || event.at - previous.end > 60000) {
+          if (!previous || event.at - previous.end > ACTIVE_GAP) {
             spans.push({ start: event.at, end: event.at, events: [event] });
           } else {
             previous.end = event.at;
@@ -592,7 +500,7 @@ function createCodexProfile(tree, billing) {
         const prompt = (span.events || transcript.filter(event =>
           event.at >= span.start && event.at <= span.end))
           .find(event => event.label === 'User')?.text || '';
-        add('Activity', span.start, Math.max(span.start + 1, span.end), 1, {
+        add('Activity', span.start, Math.max(span.start + 1, span.end), MESSAGES_CATEGORY, {
           type: 'Activity', prompt: prompt.replace(/\s+/g, ' ').slice(0, 300),
           cost: threadCostPoints && Math.max(0, costAt(span.end) - costAt(span.start))
         });
@@ -601,7 +509,7 @@ function createCodexProfile(tree, billing) {
 
     const billingRow = billed.get(session.id);
     const usage = usageOf(entries);
-    add('Usage', trackEnd, trackEnd, 0, { type: 'Usage',
+    add('Usage', trackEnd, trackEnd, OTHER_CATEGORY, { type: 'Usage',
       totalTokens: usage.total_tokens || 0, inputTokens: usage.input_tokens || 0,
       cachedTokens: usage.cached_input_tokens || 0, outputTokens: usage.output_tokens || 0,
       credits: billingRow && billingRow.estimated_usage_credits_micros / 1000000,
@@ -625,10 +533,10 @@ function createCodexProfile(tree, billing) {
     };
   });
 
-  return { meta: { processType: 0, product: 'Codex', stackwalk: 0, version: 64,
-    preprocessedProfileVersion: 64, symbolicationNotSupported: true, interval: 1,
-    startTime, profilingStartTime: 0, markerSchema: markerSchemas(), categories: CATEGORIES,
-    usesOnlyOneStackType: true }, libs: [], threads, shared: shared.finish(), counters: [] };
+  return {
+    meta: profileMeta({ product: 'Codex', startTime, markerSchema: markerSchemas() }),
+    libs: [], threads, shared: buildTimelineShared(shared), counters: []
+  };
 }
 
 module.exports = { createCodexProfile };

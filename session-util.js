@@ -79,5 +79,5 @@ function addUsage(into, usage, keys = Object.keys(into)) {
 }
 
 module.exports = {
-  statSafe, readJsonlFile, activity, byLastActive, addUsage, addModels
+  ACTIVE_GAP, statSafe, readJsonlFile, activity, byLastActive, addUsage, addModels
 };

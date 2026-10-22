@@ -60,6 +60,9 @@ assert(names(profile.threads[0]).includes('Context Size'));
 assert(names(profile.threads[0]).includes('Output Tokens'));
 assert(names(profile.threads[0]).includes('gpt-test'));
 assert(names(profile.threads[0]).includes('Activity'));
+const subagent = profile.threads[0].markers.data.find(marker => marker.type === 'Subagent');
+assert.deepStrictEqual([subagent.agentType, subagent.description, subagent.cost],
+  ['agent', 'Search agent', 0.25]);
 
 const usage = profile.threads[0].markers.data.find(marker => marker.type === 'Usage');
 assert.deepStrictEqual([usage.totalTokens, usage.credits, usage.cost], [100, 10, 1]);

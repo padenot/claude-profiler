@@ -27,6 +27,7 @@
     "codex-profile.js",
     "session-index.js",
     "session-util.js",
+    "timeline-profile.js",
     "remote.js",
     "JSONL_FORMAT.md",
     "README.md"
