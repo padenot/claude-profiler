@@ -2,14 +2,12 @@
 // rollouts record completed items with exact start/end times; older point
 // events are kept as text markers so their history remains inspectable too.
 
-const { ACTIVE_GAP } = require('./session-util.js');
 const { isBillingPlaceholder, legacyDuplicates } = require('./codex-backend.js');
 const {
   OTHER_CATEGORY, MESSAGES_CATEGORY, SUBAGENTS_CATEGORY, TOOLS_CATEGORY,
-  FAILED_TOOLS_CATEGORY, MODEL_CATEGORY, IDLE_CATEGORY,
-  TEXT_SCHEMA, INTERVENTION_SCHEMA, TOOL_CALL_SCHEMA, SUBAGENT_SCHEMA,
-  ACTIVITY_SCHEMA, createTimelineShared, buildTimelineShared, createStackBuilder, profileMeta,
-  timeRange
+  FAILED_TOOLS_CATEGORY, MODEL_CATEGORY, AGENT_SCHEMAS, createTimelineShared,
+  buildTimelineShared, profileMeta, timeRange, createMarkerTable, addCostGraph, costAtTime,
+  totalCostPoints, transcriptSamples, activitySpans, agentThread
 } = require('./timeline-profile.js');
 
 function timestamp(value) {
@@ -171,73 +169,6 @@ function costPoints(entries, billing, trackStart, trackEnd) {
   return points;
 }
 
-function markerSchemas() {
-  return [
-    TEXT_SCHEMA, INTERVENTION_SCHEMA, TOOL_CALL_SCHEMA, SUBAGENT_SCHEMA, ACTIVITY_SCHEMA,
-    { name: 'Turn', tooltipLabel: '{marker.name}', tableLabel: '{marker.name}: {marker.data.status}',
-      chartLabel: '{marker.name}', display: ['marker-chart', 'marker-table', 'timeline-overview'],
-      fields: [
-        { key: 'status', label: 'Status', format: 'string' },
-        { key: 'model', label: 'Model', format: 'string' },
-        { key: 'effort', label: 'Effort', format: 'string' }
-      ] },
-    { name: 'Reasoning', tooltipLabel: '{marker.name}', tableLabel: '{marker.data.text}',
-      chartLabel: '{marker.name}', display: ['marker-chart', 'marker-table'],
-      fields: [{ key: 'text', label: 'Summary', format: 'string' }] },
-    { name: 'ModelResponse', tooltipLabel: '{marker.data.model}',
-      tableLabel: '{marker.data.model} ({marker.data.outputTokens} output tokens)',
-      chartLabel: '{marker.data.model}', display: ['marker-chart', 'marker-table'], fields: [
-        { key: 'model', label: 'Model', format: 'string' },
-        { key: 'effort', label: 'Effort', format: 'string' },
-        { key: 'inputTokens', label: 'Context tokens', format: 'integer' },
-        { key: 'cachedInputTokens', label: 'Cached input', format: 'integer' },
-        { key: 'outputTokens', label: 'Output tokens', format: 'integer' },
-        { key: 'reasoningTokens', label: 'Reasoning tokens', format: 'integer' }
-      ] },
-    { name: 'ContextSize', tooltipLabel: '{marker.name}', display: [], fields: [
-        { key: 'tokens', label: 'Context Size', format: 'integer' },
-        { key: 'cachedTokens', label: 'Cached input', format: 'integer' },
-        { key: 'uncachedTokens', label: 'Uncached input', format: 'integer' }
-      ], graphs: [
-        { key: 'tokens', color: 'blue', type: 'bar' },
-        { key: 'cachedTokens', color: 'green', type: 'bar' }
-      ] },
-    { name: 'OutputTokens', tooltipLabel: '{marker.name}', display: [], fields: [
-        { key: 'tokens', label: 'Output Tokens', format: 'integer' },
-        { key: 'reasoningTokens', label: 'Reasoning Tokens', format: 'integer' }
-      ], graphs: [
-        { key: 'tokens', color: 'purple', type: 'bar' },
-        { key: 'reasoningTokens', color: 'orange', type: 'bar' }
-      ] },
-    { name: 'Usage', tooltipLabel: '{marker.name}', tableLabel: '{marker.name}',
-      display: ['marker-table'], fields: [
-        { key: 'totalTokens', label: 'Total tokens', format: 'integer' },
-        { key: 'inputTokens', label: 'Input tokens', format: 'integer' },
-        { key: 'cachedTokens', label: 'Cached input', format: 'integer' },
-        { key: 'outputTokens', label: 'Output tokens', format: 'integer' },
-        { key: 'credits', label: 'Credits', format: 'decimal' },
-        { key: 'cost', label: 'Cost ($)', format: 'decimal' }
-      ] },
-    { name: 'ThreadCost', tooltipLabel: '{marker.name}',
-      tableLabel: '{marker.name}: ${marker.data.cost}', display: [], fields: [
-        { key: 'cost', label: 'Thread cost ($)', format: 'decimal' },
-        { key: 'credits', label: 'Thread credits', format: 'decimal' }
-      ], graphs: [{ key: 'cost', color: 'blue', type: 'line' }] },
-    { name: 'ResponseCost', tooltipLabel: '{marker.name}',
-      tableLabel: '{marker.name}: ${marker.data.cost}', display: [], fields: [
-        { key: 'cost', label: 'Response cost ($)', format: 'decimal' },
-        { key: 'inputTokens', label: 'Context tokens', format: 'integer' },
-        { key: 'cachedInputTokens', label: 'Cached input', format: 'integer' },
-        { key: 'outputTokens', label: 'Output tokens', format: 'integer' }
-      ], graphs: [{ key: 'cost', color: 'orange', type: 'bar' }] },
-    { name: 'TotalCost', tooltipLabel: '{marker.name}',
-      tableLabel: '{marker.name}: ${marker.data.cost}', display: [], fields: [
-        { key: 'cost', label: 'Total cost ($)', format: 'decimal' },
-        { key: 'credits', label: 'Total credits', format: 'decimal' }
-      ], graphs: [{ key: 'cost', color: 'purple', type: 'line' }] }
-  ];
-}
-
 function createCodexProfile(tree, billing) {
   if (!tree?.length) throw new Error('No Codex thread found');
   const ranges = tree.map(({ entries }) => timeRange(entries)).filter(Boolean);
@@ -268,78 +199,23 @@ function createCodexProfile(tree, billing) {
   }
 
   const costs = new Map();
-  const totalDeltas = [];
   for (const track of tracks) {
     const billingRow = billed.get(track.session.id);
     if (!billingRow) continue;
     const { start, end } = trackRange(track.entries);
-    const points = costPoints(track.entries, billingRow, start, end);
-    costs.set(track.session.id, points);
-    let previousCost = 0;
-    let previousCredits = 0;
-    for (const point of points) {
-      totalDeltas.push({ at: point.at, cost: point.cost - previousCost,
-        credits: point.credits - previousCredits });
-      previousCost = point.cost;
-      previousCredits = point.credits;
-    }
+    costs.set(track.session.id, costPoints(track.entries, billingRow, start, end));
   }
-  totalDeltas.sort((a, b) => a.at - b.at);
-  let totalCost = 0;
-  let totalCredits = 0;
-  const totalPoints = billed.size === tracks.length && totalDeltas.map(point => {
-    totalCost += point.cost;
-    totalCredits += point.credits;
-    return { at: point.at, cost: totalCost, credits: totalCredits };
-  });
+  const totalPoints = billed.size === tracks.length && totalCostPoints(costs.values());
 
   const threads = tracks.map(({ session, entries }, index) => {
     const { start: trackStart, end: trackEnd } = trackRange(entries);
-    const markers = { data: [], name: [], startTime: [], endTime: [], phase: [], category: [], length: 0 };
-    const add = (name, start, end, category, data) => {
-      markers.name.push(shared.intern(name));
-      markers.startTime.push(Math.max(0, start - startTime));
-      markers.endTime.push(Math.max(0, end - startTime));
-      markers.phase.push(start === end ? 0 : 1);
-      markers.category.push(category);
-      markers.data.push(data);
-      markers.length++;
-    };
-    const addCostGraph = (points, name, type, end) => {
-      points.forEach((point, pointIndex) => add(name, point.at,
-        points[pointIndex + 1]?.at ?? end, OTHER_CATEGORY,
-        { type, cost: point.cost, credits: point.credits }));
-    };
-
-    // Embed a readable transcript and put every logged contribution on an
-    // allocation-like sample stack. This gives Codex the same useful call-tree,
-    // flame-graph and source-view surfaces as a Claude profile.
+    const { markers, add } = createMarkerTable(shared, startTime);
     const isDuplicate = legacyDuplicates(entries);
     const transcript = transcriptEvents(entries, isDuplicate);
-    const document = [`# ${session.title}`, `# ${session.cwd || 'Codex'}`, ''];
-    for (const event of transcript) {
-      event.line = document.length + 1;
-      document.push(`[${new Date(event.at).toISOString()}] ${event.label}`);
-      document.push(...event.text.split('\n'), '');
-    }
-    const slug = session.id.replace(/[^A-Za-z0-9-]/g, '').slice(0, 60) || `thread-${index}`;
-    const sourceIndex = shared.registerSource(`${slug}.transcript.txt`, document.join('\n'));
-    const addStack = createStackBuilder(shared, sourceIndex);
-    const sampleRows = transcript.map(event => ({
-      time: event.at - startTime,
-      stack: addStack(['Codex context', event.label], event.category, event.line),
-      weight: Buffer.byteLength(event.text, 'utf8')
-    }));
-    const idleStack = addStack(['Idle'], IDLE_CATEGORY);
-    for (let sampleIndex = 1; sampleIndex < transcript.length; sampleIndex++) {
-      const before = transcript[sampleIndex - 1].at;
-      const after = transcript[sampleIndex].at;
-      if (after - before > ACTIVE_GAP) {
-        sampleRows.push({ time: before - startTime + 1, stack: idleStack, weight: 0 });
-        sampleRows.push({ time: after - startTime - 1, stack: idleStack, weight: 0 });
-      }
-    }
-    sampleRows.sort((a, b) => a.time - b.time);
+    const samples = transcriptSamples(shared, transcript, {
+      title: session.title, subtitle: session.cwd || 'Codex', rootName: 'Codex context', startTime,
+      slug: session.id.replace(/[^A-Za-z0-9-]/g, '').slice(0, 60) || `thread-${index}`
+    });
 
     const contextByTurn = new Map(entries.filter(e => e.type === 'turn_context')
       .map(e => [e.payload?.turn_id, e.payload || {}]));
@@ -428,8 +304,7 @@ function createCodexProfile(tree, billing) {
 
     const responses = responseUsage(entries, isDuplicate);
     const threadCostPoints = costs.get(session.id);
-    const costAt = time => [...threadCostPoints].reverse()
-      .find(point => point.at <= time)?.cost || 0;
+    const costAt = threadCostPoints && costAtTime(threadCostPoints);
     const contexts = entries.filter(entry => entry.type === 'turn_context')
       .map(entry => ({ at: timestamp(entry.timestamp), payload: entry.payload || {} }))
       .filter(context => context.at !== null);
@@ -471,25 +346,14 @@ function createCodexProfile(tree, billing) {
     // by less than a minute into activity spans so their overview remains as
     // useful as modern Turn markers and Claude's Activity markers.
     if (transcript.length > 0) {
-      const spans = explicitActivity;
-      if (spans.length === 0) {
-        for (const event of transcript) {
-          const previous = spans.at(-1);
-          if (!previous || event.at - previous.end > ACTIVE_GAP) {
-            spans.push({ start: event.at, end: event.at, events: [event] });
-          } else {
-            previous.end = event.at;
-            previous.events.push(event);
-          }
-        }
-      }
+      const spans = explicitActivity.length ? explicitActivity : activitySpans(transcript);
       for (const span of spans) {
         const prompt = (span.events || transcript.filter(event =>
           event.at >= span.start && event.at <= span.end))
           .find(event => event.label === 'User')?.text || '';
         add('Activity', span.start, Math.max(span.start + 1, span.end), MESSAGES_CATEGORY, {
           type: 'Activity', prompt: prompt.replace(/\s+/g, ' ').slice(0, 300),
-          cost: threadCostPoints && Math.max(0, costAt(span.end) - costAt(span.start))
+          cost: costAt && Math.max(0, costAt(span.end) - costAt(span.start))
         });
       }
     }
@@ -501,27 +365,19 @@ function createCodexProfile(tree, billing) {
       cachedTokens: usage.cached_input_tokens || 0, outputTokens: usage.output_tokens || 0,
       credits: billingRow && billingRow.estimated_usage_credits_micros / 1000000,
       cost: billingRow && billingRow.estimated_usage_usd_micros / 1000000 });
-    if (threadCostPoints) addCostGraph(threadCostPoints, 'Thread Cost ($)', 'ThreadCost', trackEnd);
+    if (threadCostPoints) {
+      addCostGraph(add, threadCostPoints, 'Thread Cost ($)', 'ThreadCost', trackEnd);
+    }
     if (index === 0 && totalPoints) {
-      addCostGraph(totalPoints, 'Total Cost ($)', 'TotalCost', profileEnd);
+      addCostGraph(add, totalPoints, 'Total Cost ($)', 'TotalCost', profileEnd);
     }
 
-    return {
-      processType: 'default', processName: session.cwd || 'Codex',
-      processStartupTime: trackStart - startTime,
-      processShutdownTime: (index === 0 ? profileEnd : trackEnd) - startTime,
-      registerTime: trackStart - startTime,
-      unregisterTime: (index === 0 ? profileEnd : trackEnd) - startTime,
-      pausedRanges: [], showMarkersInTimeline: true, name: session.title,
-      isMainThread: true, pid: index, tid: index,
-      samples: { length: sampleRows.length, stack: sampleRows.map(row => row.stack),
-        time: sampleRows.map(row => row.time), weight: sampleRows.map(row => row.weight),
-        weightType: 'bytes' }, markers
-    };
+    return agentThread({ session, processName: session.cwd || 'Codex', index, trackStart,
+      trackEnd, profileEnd, startTime, samples, markers });
   });
 
   return {
-    meta: profileMeta({ product: 'Codex', startTime, markerSchema: markerSchemas() }),
+    meta: profileMeta({ product: 'Codex', startTime, markerSchema: AGENT_SCHEMAS }),
     libs: [], threads, shared: buildTimelineShared(shared), counters: []
   };
 }
