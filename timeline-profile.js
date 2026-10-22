@@ -160,6 +160,20 @@ const ACTIVITY_SCHEMA = {
   ]
 };
 
+// A loop rather than Math.min(...times): a long session with sub-agents has
+// more timestamps than a spread call can pass as arguments.
+function timeRange(entries) {
+  let start = Infinity;
+  let end = -Infinity;
+  for (const entry of entries) {
+    const at = new Date(entry.timestamp).getTime();
+    if (!Number.isFinite(at)) continue;
+    if (at < start) start = at;
+    if (at > end) end = at;
+  }
+  return start <= end ? { start, end } : null;
+}
+
 // The tables a v64 profile shares across every thread, plus the sources table
 // each track's transcript is embedded in.
 function createTimelineShared() {
@@ -367,5 +381,5 @@ module.exports = {
   OTHER_CATEGORY, MESSAGES_CATEGORY, SUBAGENTS_CATEGORY, TOOLS_CATEGORY,
   FAILED_TOOLS_CATEGORY, MODEL_CATEGORY, IDLE_CATEGORY,
   TEXT_SCHEMA, INTERVENTION_SCHEMA, TOOL_CALL_SCHEMA, SUBAGENT_SCHEMA, ACTIVITY_SCHEMA,
-  createTimelineShared, buildTimelineShared, createStackBuilder, profileMeta
+  createTimelineShared, buildTimelineShared, createStackBuilder, profileMeta, timeRange
 };

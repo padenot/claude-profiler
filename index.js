@@ -13,7 +13,7 @@ const { readJsonlFile: readSessionJsonl, byLastActive } = require('./session-uti
 const {
   MESSAGES_CATEGORY, TOOLS_CATEGORY, MODEL_CATEGORY, IDLE_CATEGORY,
   TEXT_SCHEMA, INTERVENTION_SCHEMA, TOOL_CALL_SCHEMA, SUBAGENT_SCHEMA, ACTIVITY_SCHEMA,
-  createTimelineShared, buildTimelineShared, createStackBuilder, profileMeta
+  createTimelineShared, buildTimelineShared, createStackBuilder, profileMeta, timeRange
 } = require('./timeline-profile.js');
 
 // Prices per million tokens, from
@@ -1245,9 +1245,7 @@ function createFirefoxProfile(jsonlData, subagents) {
 
   // Time range covers every track.
   tracks.forEach((track) => {
-    const times = track.messages.map(msg => new Date(msg.timestamp).getTime());
-    track.start = Math.min(...times);
-    track.end = Math.max(...times);
+    ({ start: track.start, end: track.end } = timeRange(track.messages));
   });
 
   // Sub-agent tracks are laid out in the order they started, with the main

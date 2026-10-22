@@ -8,7 +8,8 @@ const {
   OTHER_CATEGORY, MESSAGES_CATEGORY, SUBAGENTS_CATEGORY, TOOLS_CATEGORY,
   FAILED_TOOLS_CATEGORY, MODEL_CATEGORY, IDLE_CATEGORY,
   TEXT_SCHEMA, INTERVENTION_SCHEMA, TOOL_CALL_SCHEMA, SUBAGENT_SCHEMA,
-  ACTIVITY_SCHEMA, createTimelineShared, buildTimelineShared, createStackBuilder, profileMeta
+  ACTIVITY_SCHEMA, createTimelineShared, buildTimelineShared, createStackBuilder, profileMeta,
+  timeRange
 } = require('./timeline-profile.js');
 
 function timestamp(value) {
@@ -20,20 +21,6 @@ function timestamp(value) {
 function durationMs(duration) {
   if (!duration || typeof duration !== 'object') return 0;
   return (duration.secs || 0) * 1000 + (duration.nanos || 0) / 1000000;
-}
-
-// A loop rather than Math.min(...times): a long session with sub-agents has
-// more timestamps than a spread call can pass as arguments.
-function timeRange(entries) {
-  let start = Infinity;
-  let end = -Infinity;
-  for (const entry of entries) {
-    const at = timestamp(entry.timestamp);
-    if (at === null) continue;
-    if (at < start) start = at;
-    if (at > end) end = at;
-  }
-  return start <= end ? { start, end } : null;
 }
 
 function textBlocks(content) {
