@@ -10,6 +10,7 @@ const zlib = require('zlib');
 const {
   statSafe, parseJsonl, activity, promptTitle, byLastActive, addUsage, addModels
 } = require('./session-util.js');
+const { cachedMap, fileStamp } = require('./row-cache.js');
 
 // The canonical generation log names: session.jsonl for format zero, then
 // session.vN.jsonl, each optionally Zstandard-compressed. Temporary and
@@ -335,11 +336,14 @@ function listSessions({ root = dshDir() } = {}) {
   return foldSubagents(findSessionFiles(root).map(summaryOrNull).filter(Boolean));
 }
 
-// The same, with the files read in parallel by a worker pool.
+// The same, with the files read in parallel by a worker pool, and only those
+// that changed since the last launch.
 async function listSessionsInPool(pool, { root = dshDir() } = {}) {
-  return foldSubagents(
-    (await pool.map('dsh', findSessionFiles(root), file => file)).filter(Boolean)
-  );
+  const rows = await cachedMap(pool, 'dsh', findSessionFiles(root), {
+    fileOf: file => file,
+    stampOf: file => fileStamp(statSafe(file))
+  });
+  return foldSubagents(rows.filter(Boolean));
 }
 
 function foldSubagents(sessions) {

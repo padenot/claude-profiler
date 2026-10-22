@@ -8,6 +8,7 @@ const path = require('path');
 const {
   statSafe, activity, byLastActive, addUsage, addModels
 } = require('./session-util.js');
+const { cachedMap, fileStamp } = require('./row-cache.js');
 
 function projectsDir() {
   return path.join(
@@ -56,7 +57,7 @@ function projectLabel(project) {
 // Sub-agent transcripts are the bulk of a session's bytes, so a session's size
 // is only meaningful with them included. Summing the file sizes avoids reading
 // 158MB of transcripts when all that is wanted is a number.
-function subagentBytes(sessionFile) {
+function subagentFiles(sessionFile) {
   const dir = path.join(
     path.dirname(sessionFile),
     path.basename(sessionFile, '.jsonl'),
@@ -64,20 +65,27 @@ function subagentBytes(sessionFile) {
   );
 
   if (!fs.existsSync(dir)) {
-    return { bytes: 0, count: 0 };
+    return [];
   }
 
-  let bytes = 0;
-  let count = 0;
-  for (const name of fs.readdirSync(dir)) {
-    if (!name.startsWith('agent-') || !name.endsWith('.jsonl')) {
-      continue;
-    }
-    bytes += statSafe(path.join(dir, name))?.size || 0;
-    count++;
-  }
+  return fs.readdirSync(dir)
+    .filter(name => name.startsWith('agent-') && name.endsWith('.jsonl'))
+    .map(name => path.join(dir, name));
+}
 
-  return { bytes, count };
+function subagentBytes(sessionFile) {
+  const files = subagentFiles(sessionFile);
+  return {
+    bytes: files.reduce((sum, file) => sum + (statSafe(file)?.size || 0), 0),
+    count: files.length
+  };
+}
+
+// A row changes when the session or any of its sub-agents does.
+function sessionStamp(sessionFile) {
+  return [sessionFile, ...subagentFiles(sessionFile)]
+    .map(file => fileStamp(statSafe(file)))
+    .join(' ');
 }
 
 function emptyUsage() {
@@ -235,9 +243,13 @@ function listSessions(deps, { root, withSubagentCost = true } = {}) {
     .sort(byLastActive);
 }
 
-// The same, with the files read in parallel by a worker pool.
+// The same, with the files read in parallel by a worker pool, and only those
+// that changed since the last launch.
 async function listSessionsInPool(pool, { root } = {}) {
-  const rows = await pool.map('claude', findSessionFiles(root), entry => entry.file);
+  const rows = await cachedMap(pool, 'claude', findSessionFiles(root), {
+    fileOf: entry => entry.file,
+    stampOf: entry => sessionStamp(entry.file)
+  });
   return rows.filter(Boolean).sort(byLastActive);
 }
 

@@ -8,6 +8,7 @@ const path = require('path');
 const {
   statSafe, readJsonlFile, activity, promptTitle, byLastActive, addUsage, addModels
 } = require('./session-util.js');
+const { cachedMap, fileStamp } = require('./row-cache.js');
 
 const THREAD_USAGE_ENDPOINT =
   'https://chatgpt.com/backend-api/wham/usage/thread_usage/query';
@@ -236,12 +237,15 @@ function listSessions({ root = codexDir() } = {}) {
   return foldSubagents(summarizeSessions(root));
 }
 
-// The same, with the rollouts read in parallel by a worker pool. The titles
-// are applied here rather than sent along with every file.
+// The same, with the rollouts read in parallel by a worker pool, and only
+// those that changed since the last launch. The titles are applied here, since
+// they live in a file of their own.
 async function listSessionsInPool(pool, { root = codexDir() } = {}) {
   const titles = sessionTitles(root);
-  const sessions = (await pool.map('codex', findSessionFiles(root), file => file))
-    .filter(Boolean);
+  const sessions = (await cachedMap(pool, 'codex', findSessionFiles(root), {
+    fileOf: file => file,
+    stampOf: file => fileStamp(statSafe(file))
+  })).filter(Boolean);
   for (const session of sessions) {
     session.title = titles.get(session.id) || session.title;
   }
