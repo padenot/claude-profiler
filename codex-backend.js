@@ -219,21 +219,36 @@ function summarizeSession(file, titles = new Map()) {
 
 // A live or corrupt session should not take down the picker, nor the profile
 // of an unrelated thread.
+function summaryOrNull(file, titles) {
+  try {
+    return summarizeSession(file, titles);
+  } catch {
+    return null;
+  }
+}
+
 function summarizeSessions(root) {
   const titles = sessionTitles(root);
-  const sessions = [];
-  for (const file of findSessionFiles(root)) {
-    try {
-      sessions.push(summarizeSession(file, titles));
-    } catch {
-      // Skip this rollout.
-    }
-  }
-  return sessions;
+  return findSessionFiles(root).map(file => summaryOrNull(file, titles)).filter(Boolean);
 }
 
 function listSessions({ root = codexDir() } = {}) {
-  const sessions = summarizeSessions(root);
+  return foldSubagents(summarizeSessions(root));
+}
+
+// The same, with the rollouts read in parallel by a worker pool. The titles
+// are applied here rather than sent along with every file.
+async function listSessionsInPool(pool, { root = codexDir() } = {}) {
+  const titles = sessionTitles(root);
+  const sessions = (await pool.map('codex', findSessionFiles(root), file => file))
+    .filter(Boolean);
+  for (const session of sessions) {
+    session.title = titles.get(session.id) || session.title;
+  }
+  return foldSubagents(sessions);
+}
+
+function foldSubagents(sessions) {
 
   const byId = new Map(sessions.map(session => [session.id, session]));
   for (const session of sessions) {
@@ -446,14 +461,18 @@ async function addBilling(sessions, options = {}) {
 }
 
 async function listSessionsWithUsage(options = {}) {
-  const sessions = listSessions(options);
+  const sessions = options.pool
+    ? await listSessionsInPool(options.pool, options)
+    : listSessions(options);
   return addBilling(sessions, options);
 }
 
 module.exports = {
   findSessionFiles,
   listSessions,
+  listSessionsInPool,
   listSessionsWithUsage,
+  summaryOrNull,
   addBilling,
   fetchBilling,
   isBillingPlaceholder,

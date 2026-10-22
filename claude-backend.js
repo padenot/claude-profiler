@@ -198,44 +198,54 @@ function subagentSummary(sessionFile, deps) {
   }
 }
 
-// Every session, newest first. A file that fails to parse is skipped rather
-// than taking the whole listing down with it: a session being written to can be
-// caught mid-line.
-function listSessions(deps, { root, withSubagentCost = true } = {}) {
-  const sessions = [];
-
-  for (const entry of findSessionFiles(root)) {
-    let session;
-    try {
-      session = summarizeSession(entry, deps);
-    } catch {
-      continue;
-    }
-
-    // A session with no messages is one Claude Code opened and nothing came of
-    // — there is nothing to profile in it.
-    if (session.messages === 0) {
-      continue;
-    }
-
-    if (withSubagentCost && session.subagents > 0) {
-      const agents = subagentSummary(session.file, deps);
-      session.cost += agents.cost;
-      addUsage(session.usage, agents.usage);
-      addModels(session.models, agents.models, emptyUsage);
-      session.tokens = Object.values(session.usage)
-        .reduce((sum, value) => sum + value, 0);
-    }
-
-    sessions.push(session);
+// One session's row, sub-agents included, or null when it has no place in the
+// list. A file that fails to parse is skipped rather than taking the whole
+// listing down with it: a session being written to can be caught mid-line.
+function sessionRow(entry, deps, withSubagentCost = true) {
+  let session;
+  try {
+    session = summarizeSession(entry, deps);
+  } catch {
+    return null;
   }
 
-  return sessions.sort(byLastActive);
+  // A session with no messages is one Claude Code opened and nothing came of
+  // — there is nothing to profile in it.
+  if (session.messages === 0) {
+    return null;
+  }
+
+  if (withSubagentCost && session.subagents > 0) {
+    const agents = subagentSummary(session.file, deps);
+    session.cost += agents.cost;
+    addUsage(session.usage, agents.usage);
+    addModels(session.models, agents.models, emptyUsage);
+    session.tokens = Object.values(session.usage)
+      .reduce((sum, value) => sum + value, 0);
+  }
+
+  return session;
+}
+
+// Every session, newest first.
+function listSessions(deps, { root, withSubagentCost = true } = {}) {
+  return findSessionFiles(root)
+    .map(entry => sessionRow(entry, deps, withSubagentCost))
+    .filter(Boolean)
+    .sort(byLastActive);
+}
+
+// The same, with the files read in parallel by a worker pool.
+async function listSessionsInPool(pool, { root } = {}) {
+  const rows = await pool.map('claude', findSessionFiles(root), entry => entry.file);
+  return rows.filter(Boolean).sort(byLastActive);
 }
 
 module.exports = {
   findSessionFiles,
   listSessions,
+  listSessionsInPool,
+  sessionRow,
   summarizeSession,
   projectLabel
 };

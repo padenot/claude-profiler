@@ -29,8 +29,10 @@
     "dsh-profile.js",
     "session-index.js",
     "session-util.js",
+    "session-worker.js",
     "timeline-profile.js",
     "remote.js",
+    "worker-pool.js",
     "JSONL_FORMAT.md",
     "README.md"
   ]

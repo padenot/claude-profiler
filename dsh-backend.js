@@ -321,17 +321,28 @@ function summarizeSession(file) {
   };
 }
 
+// A live or corrupt session should not take down the combined picker.
+function summaryOrNull(file) {
+  try {
+    return summarizeSession(file);
+  } catch {
+    return null;
+  }
+}
+
 // Every session, newest first, with each sub-agent charged to its root.
 function listSessions({ root = dshDir() } = {}) {
-  const sessions = [];
-  for (const file of findSessionFiles(root)) {
-    try {
-      sessions.push(summarizeSession(file));
-    } catch {
-      // A live or corrupt session should not take down the combined picker.
-    }
-  }
+  return foldSubagents(findSessionFiles(root).map(summaryOrNull).filter(Boolean));
+}
 
+// The same, with the files read in parallel by a worker pool.
+async function listSessionsInPool(pool, { root = dshDir() } = {}) {
+  return foldSubagents(
+    (await pool.map('dsh', findSessionFiles(root), file => file)).filter(Boolean)
+  );
+}
+
+function foldSubagents(sessions) {
   const byId = new Map(sessions.map(session => [session.id, session]));
   for (const session of sessions) {
     if (!session.parentId) continue;
@@ -567,13 +578,18 @@ async function addBilling(sessions, options = {}) {
 }
 
 async function listSessionsWithUsage(options = {}) {
-  return addBilling(listSessions(options), options);
+  const sessions = options.pool
+    ? await listSessionsInPool(options.pool, options)
+    : listSessions(options);
+  return addBilling(sessions, options);
 }
 
 module.exports = {
   findSessionFiles,
   listSessions,
+  listSessionsInPool,
   listSessionsWithUsage,
+  summaryOrNull,
   addBilling,
   fetchBilling,
   summarizeSession,

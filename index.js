@@ -8,6 +8,7 @@ const { spawn } = require('child_process');
 // Attribution of a message's bytes, shared with the size profile so both tools
 // build the same stacks.
 const { attributeEntry, calibrate } = require('./context-size.js');
+const { createPool } = require('./worker-pool.js');
 const { renderTranscript } = require('./transcript.js');
 const {
   readJsonlFile: readSessionJsonl, byLastActive, promptTitle
@@ -1648,12 +1649,9 @@ function reportSizeProfile(profile, sizeAt) {
 // the JSON asked for: stdout is a protocol here, so the progress lines the
 // interactive paths print go to stderr instead.
 async function runJsonMode(command, id, options) {
-  const { listSessions } = require('./claude-backend.js');
+  const { listSessionsInPool } = require('./claude-backend.js');
   const { listSessionsWithUsage: listCodexSessions } = require('./codex-backend.js');
   const { listSessionsWithUsage: listDshSessions } = require('./dsh-backend.js');
-  const deps = {
-    readJsonlFile, readSubagents, sessionTitle, conversationEntries, totalCost
-  };
 
   if (command === 'probe') {
     const { PROTOCOL } = require('./remote.js');
@@ -1667,9 +1665,11 @@ async function runJsonMode(command, id, options) {
   if (command === 'list') {
     // `file` is a path on this machine, which means nothing to the caller and
     // would be misleading in its UI; the id is what it addresses sessions by.
-    const sessions = [
-      ...listSessions(deps), ...(await listCodexSessions()), ...(await listDshSessions())
-    ].sort(byLastActive)
+    const pool = createPool();
+    const lists = await Promise.all([
+      listSessionsInPool(pool), listCodexSessions({ pool }), listDshSessions({ pool })
+    ]);
+    const sessions = lists.flat().sort(byLastActive)
       .map(({ file, billingThreadIds, billingThreads, parentId, internal, billingCalls, ...rest }) =>
         rest);
     process.stdout.write(JSON.stringify({ sessions }));
@@ -1902,28 +1902,28 @@ function startIndexServer(profilerOrigin, options = {}, source = localSource()) 
 // ~/.dsh/sessions, and profiled in process. The methods are async only because
 // the remote source's are, and the server awaits both through the same code.
 function localSource() {
-  const { listSessions } = require('./claude-backend.js');
+  const { listSessionsInPool } = require('./claude-backend.js');
   const { listSessionsWithUsage: listCodexSessions } = require('./codex-backend.js');
   const { listSessionsWithUsage: listDshSessions, sessionStamp: dshSessionStamp } =
     require('./dsh-backend.js');
-  const deps = {
-    readJsonlFile, readSubagents, sessionTitle, conversationEntries, totalCost
-  };
-  // Begin the Codex and DSH scans before the HTTP server is opened. Both reach
-  // the network, so the browser launch and the local Claude scan overlap those
-  // round trips, while the first page request reuses these exact promises
-  // instead of issuing them again. Later reloads still read fresh data.
-  const nextCodexSessions = prefetchFirst(listCodexSessions);
-  const nextDshSessions = prefetchFirst(listDshSessions);
+  // All three scans share one pool, so their files are read in parallel with
+  // each other as well as among themselves.
+  const pool = createPool();
+  // Begin the scans before the HTTP server is opened, so that the browser
+  // launch overlaps them and the Codex and DSH network round trips, while the
+  // first page request reuses these exact promises instead of issuing them
+  // again. Later reloads still read fresh data.
+  const nextClaudeSessions = prefetchFirst(() => listSessionsInPool(pool));
+  const nextCodexSessions = prefetchFirst(() => listCodexSessions({ pool }));
+  const nextDshSessions = prefetchFirst(() => listDshSessions({ pool }));
 
   return {
     host: null,
     sessions: async () => {
-      const codex = nextCodexSessions();
-      const dsh = nextDshSessions();
-      const claude = listSessions(deps);
-      return [...claude, ...(await codex), ...(await dsh)]
-        .sort(byLastActive);
+      const lists = await Promise.all([
+        nextClaudeSessions(), nextCodexSessions(), nextDshSessions()
+      ]);
+      return lists.flat().sort(byLastActive);
     },
 
     stamp: async (id) => {
@@ -2395,7 +2395,13 @@ async function main() {
   }
 }
 
+// What a worker needs to summarize a Claude session the way this process would.
+const summaryDeps = {
+  readJsonlFile, readSubagents, sessionTitle, conversationEntries, totalCost
+};
+
 module.exports = {
+  summaryDeps,
   readJsonlFile,
   readSubagents,
   readSubagentsForSession,
