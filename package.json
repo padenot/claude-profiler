@@ -26,6 +26,7 @@
     "codex-backend.js",
     "codex-profile.js",
     "session-index.js",
+    "session-util.js",
     "remote.js",
     "JSONL_FORMAT.md",
     "README.md"

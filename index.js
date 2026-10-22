@@ -9,6 +9,7 @@ const { spawn } = require('child_process');
 // build the same stacks.
 const { attributeEntry, contextChain, calibrate } = require('./context-size.js');
 const { renderTranscript } = require('./transcript.js');
+const { readJsonlFile: readSessionJsonl, byLastActive } = require('./session-util.js');
 
 // Prices per million tokens, from
 // https://platform.claude.com/docs/en/about-claude/pricing (checked 2026-08-09).
@@ -420,11 +421,8 @@ function costWithTokens(cost, tokens, unit = 'tokens') {
 }
 
 function readJsonlFile(filePath) {
-  const content = fs.readFileSync(filePath, 'utf-8');
-  const lines = content.trim().split('\n');
-  const entries = lines.filter(line => line.length > 0).map(line => JSON.parse(
-    MODEL_OVERRIDES.reduce((text, { mention }) => text.replace(mention, ''), line)
-  ));
+  const entries = readSessionJsonl(filePath, line =>
+    MODEL_OVERRIDES.reduce((text, { mention }) => text.replace(mention, ''), line));
   if (MODEL_OVERRIDES.length) {
     for (const entry of entries) {
       if (entry.message?.model) {
@@ -2004,7 +2002,7 @@ async function runJsonMode(command, id, options) {
     // `file` is a path on this machine, which means nothing to the caller and
     // would be misleading in its UI; the id is what it addresses sessions by.
     const sessions = [...listSessions(deps), ...(await listCodexSessions())]
-      .sort((a, b) => (b.ended || '').localeCompare(a.ended || ''))
+      .sort(byLastActive)
       .map(({ file, billingThreadIds, billingThreads, parentId, internal, ...rest }) => rest);
     process.stdout.write(JSON.stringify({ sessions }));
     return;
@@ -2227,7 +2225,7 @@ function localSource() {
       const codex = nextCodexSessions();
       const claude = listSessions(deps);
       return [...claude, ...(await codex)]
-        .sort((a, b) => (b.ended || '').localeCompare(a.ended || ''));
+        .sort(byLastActive);
     },
 
     stamp: async (id) => {

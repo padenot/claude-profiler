@@ -5,8 +5,10 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const {
+  statSafe, readJsonlFile, activity, byLastActive, addUsage, addModels
+} = require('./session-util.js');
 
-const ACTIVE_GAP = 60 * 1000;
 const THREAD_USAGE_ENDPOINT =
   'https://chatgpt.com/backend-api/wham/usage/thread_usage/query';
 const THREAD_USAGE_BATCH_SIZE = 100;
@@ -14,14 +16,6 @@ const THREAD_USAGE_TIMEOUT_MS = 10000;
 
 function codexDir() {
   return process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
-}
-
-function statSafe(file) {
-  try {
-    return fs.statSync(file);
-  } catch {
-    return null;
-  }
 }
 
 function jsonlFilesBelow(root) {
@@ -46,21 +40,6 @@ function findSessionFiles(root = codexDir()) {
     ...jsonlFilesBelow(path.join(root, 'sessions')),
     ...jsonlFilesBelow(path.join(root, 'archived_sessions'))
   ];
-}
-
-function readJsonlFile(file) {
-  const lines = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean);
-  return lines.map((line, i) => {
-    try {
-      return JSON.parse(line);
-    } catch (error) {
-      // The last write of a live session can be observed halfway through. Its
-      // complete records are still a valid summary; corruption in the middle
-      // of a file is not.
-      if (i === lines.length - 1) return null;
-      throw error;
-    }
-  }).filter(Boolean);
 }
 
 function sessionTitles(root = codexDir()) {
@@ -124,16 +103,6 @@ function copyUsage(usage) {
   return result;
 }
 
-function addUsage(into, usage) {
-  for (const key of Object.keys(into)) into[key] += usage?.[key] || 0;
-}
-
-function addModels(into, models) {
-  for (const [model, usage] of Object.entries(models)) {
-    addUsage(into[model] ||= emptyUsage(), usage);
-  }
-}
-
 // Current rollouts log each message, reasoning summary, tool call and model
 // response twice: as a completed item or token_usage_record, and as the legacy
 // event older rollouts only have. A legacy event is dropped once its modern
@@ -186,27 +155,15 @@ function summarizeSession(file, titles = new Map()) {
   const id = meta.id || meta.session_id ||
     basename.match(/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i)?.[0] || basename;
 
-  let started = meta.timestamp || null;
-  let ended = null;
+  const { first, last: ended, active } = activity(entries);
+  const started = meta.timestamp || first;
   let cwd = meta.cwd || '';
   let model = '';
-  let active = 0;
-  let previous = null;
   let messages = 0;
   let usage = null;
   const isDuplicate = legacyDuplicates(entries);
 
   for (const entry of entries) {
-    if (entry.timestamp) {
-      started = started || entry.timestamp;
-      ended = entry.timestamp;
-      const at = new Date(entry.timestamp).getTime();
-      if (previous !== null && at > previous && at - previous <= ACTIVE_GAP) {
-        active += at - previous;
-      }
-      previous = at;
-    }
-
     if (entry.type === 'turn_context') {
       cwd = entry.payload?.cwd || cwd;
       model = entry.payload?.model || model;
@@ -303,7 +260,7 @@ function listSessions({ root = codexDir() } = {}) {
     root.bytes += session.bytes;
     root.entries += session.entries;
     addUsage(root.usage, session.usage);
-    addModels(root.models, session.models);
+    addModels(root.models, session.models, emptyUsage);
     root.tokens = root.usage.total_tokens;
     root.billingThreadIds.push(session.id);
     root.billingThreads.push(...session.billingThreads);
@@ -313,7 +270,7 @@ function listSessions({ root = codexDir() } = {}) {
   // spawned agents still carries what they used.
   return sessions.filter(session =>
     !session.parentId && !session.internal && (session.messages > 0 || session.tokens > 0)
-  ).sort((a, b) => (b.ended || '').localeCompare(a.ended || ''));
+  ).sort(byLastActive);
 }
 
 // Read one visible thread and every sub-agent descended from it. Profiles need

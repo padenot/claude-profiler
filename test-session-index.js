@@ -450,6 +450,16 @@ check('calls without a requestId add no model tokens',
 
 fs.rmSync(root, { recursive: true, force: true });
 
+// A session being written to can be read halfway through its last line.
+const { readJsonlFile } = require('./session-util.js');
+const partial = path.join(os.tmpdir(), `claude-profiler-partial-${process.pid}.jsonl`);
+fs.writeFileSync(partial, '{"a":1}\n{"b":2}\n{"c":');
+check('a half-written last line is skipped', readJsonlFile(partial), [{ a: 1 }, { b: 2 }]);
+fs.writeFileSync(partial, '{"a":1}\n{"b":\n{"c":3}\n');
+check('a corrupt line before the last one still throws',
+  (() => { try { readJsonlFile(partial); return false; } catch { return true; } })(), true);
+fs.rmSync(partial);
+
 // --- Opening a browser -----------------------------------------------------
 
 // A missing opener makes spawn emit 'error' asynchronously rather than throw,

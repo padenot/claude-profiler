@@ -5,11 +5,9 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-
-// A gap longer than this is the session waiting for its user rather than
-// working. Sixty seconds is well past a slow tool call but well short of the
-// pauses that make a wall-clock duration meaningless.
-const ACTIVE_GAP = 60 * 1000;
+const {
+  statSafe, activity, byLastActive, addUsage, addModels
+} = require('./session-util.js');
 
 function projectsDir() {
   return path.join(
@@ -45,16 +43,6 @@ function findSessionFiles(root = projectsDir()) {
   }
 
   return files;
-}
-
-// A session being written to can lose a file between readdir and stat, and a
-// broken symlink throws the same way; neither is a reason to fail the listing.
-function statSafe(file) {
-  try {
-    return fs.statSync(file);
-  } catch {
-    return null;
-  }
 }
 
 // The project directory name is the working directory with its separators
@@ -101,10 +89,6 @@ function emptyUsage() {
   };
 }
 
-function addUsage(into, usage) {
-  for (const key of Object.keys(emptyUsage())) into[key] += usage?.[key] || 0;
-}
-
 // Claude can write several streaming snapshots for one request. As with the
 // cost calculation, only the final snapshot belongs in the totals, and a call
 // without a requestId is left out of both so that tokens and dollars agree.
@@ -141,14 +125,6 @@ function totalUsage(models) {
   return usage;
 }
 
-function addModels(into, models) {
-  for (const [model, usage] of Object.entries(models)) {
-    const target = into[model] ||= emptyUsage();
-    addUsage(target, usage);
-    if (usage.cost !== undefined) target.cost = (target.cost || 0) + usage.cost;
-  }
-}
-
 // One row of the table. Everything here comes from a single pass over the
 // session's own entries plus a stat of each sub-agent file. Sub-agent usage is
 // folded in later alongside its cost, when those transcripts are read.
@@ -159,28 +135,11 @@ function summarizeSession({ project, file }, deps) {
   const entries = readJsonlFile(file);
   const agents = subagentBytes(file);
 
-  let firstTimestamp = null;
-  let lastTimestamp = null;
+  const { first: firstTimestamp, last: lastTimestamp, active } = activity(entries);
   let cwd = null;
   let gitBranch = null;
   let version = null;
-  // Wall clock is a poor measure of a session: one left open overnight reads as
-  // 142 hours of which six minutes were work. Summing only the gaps short
-  // enough to be the session working — the same distinction the timeline draws
-  // as its Idle category — is what makes the column comparable between rows.
-  let active = 0;
-  let previous = null;
   for (const entry of entries) {
-    if (entry.timestamp) {
-      firstTimestamp = firstTimestamp || entry.timestamp;
-      lastTimestamp = entry.timestamp;
-
-      const at = new Date(entry.timestamp).getTime();
-      if (previous !== null && at > previous && at - previous <= ACTIVE_GAP) {
-        active += at - previous;
-      }
-      previous = at;
-    }
     // The last one wins: a session can change branch, and its final state is
     // the one worth showing.
     cwd = entry.cwd || cwd;
@@ -230,7 +189,7 @@ function subagentSummary(sessionFile, deps) {
       const messages = conversationEntries(agent.entries);
       const models = usageByModel(messages, totalCost);
       result.cost += totalCost(messages);
-      addModels(result.models, models);
+      addModels(result.models, models, emptyUsage);
       addUsage(result.usage, totalUsage(models));
     }
     return result;
@@ -263,7 +222,7 @@ function listSessions(deps, { root, withSubagentCost = true } = {}) {
       const agents = subagentSummary(session.file, deps);
       session.cost += agents.cost;
       addUsage(session.usage, agents.usage);
-      addModels(session.models, agents.models);
+      addModels(session.models, agents.models, emptyUsage);
       session.tokens = Object.values(session.usage)
         .reduce((sum, value) => sum + value, 0);
     }
@@ -271,10 +230,7 @@ function listSessions(deps, { root, withSubagentCost = true } = {}) {
     sessions.push(session);
   }
 
-  // Most recently active first: the session someone wants to profile is
-  // usually the one they were just in, which is not the one that was opened
-  // most recently — a session started last week can be the live one.
-  return sessions.sort((a, b) => (b.ended || '').localeCompare(a.ended || ''));
+  return sessions.sort(byLastActive);
 }
 
 module.exports = {
