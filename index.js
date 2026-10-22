@@ -409,6 +409,14 @@ function contextTokensOf(usage) {
     (usage.cache_creation_input_tokens || 0);
 }
 
+// Made once: toLocaleString builds a formatter on every call, and a long
+// session has four of these strings per API call.
+const COST_FORMAT = new Intl.NumberFormat(undefined, {
+  minimumFractionDigits: 4,
+  maximumFractionDigits: 4
+});
+const TOKENS_FORMAT = new Intl.NumberFormat();
+
 // One line of a cost breakdown: what that part of a call cost and how many
 // tokens bought it. A string rather than two fields, so the tooltip reads as
 // four lines instead of eight, and empty when nothing was billed — a call with
@@ -417,11 +425,7 @@ function costWithTokens(cost, tokens, unit = 'tokens') {
   if (!cost && !tokens) {
     return undefined;
   }
-  const amount = cost.toLocaleString(undefined, {
-    minimumFractionDigits: 4,
-    maximumFractionDigits: 4
-  });
-  return `${amount}$ (${(tokens || 0).toLocaleString()} ${unit})`;
+  return `${COST_FORMAT.format(cost)}$ (${TOKENS_FORMAT.format(tokens || 0)} ${unit})`;
 }
 
 function readJsonlFile(filePath) {
