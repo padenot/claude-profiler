@@ -5,7 +5,7 @@ const path = require('path');
 const zlib = require('zlib');
 const {
   findSessionFiles, listSessions, listSessionsWithUsage, summarizeSession,
-  sessionTree, sessionStamp, projectLabel
+  sessionTree, sessionStamp, projectLabel, fetchBilling
 } = require('./dsh-backend.js');
 const { renderPage } = require('./session-index.js');
 
@@ -145,6 +145,23 @@ check('a root that only spawned agents keeps their usage',
   [[QUIET_ID, 15, 1]]);
 fs.rmSync(quietRoot, { recursive: true, force: true });
 
+// A replayed generation counts once, and only OpenRouter can bill a generation.
+const replayRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-backend-test-'));
+const REPLAY_ID = 'session-55555555-5555-4555-8555-555555555555';
+const call = (seq, provider, responseId) => ({ type: 'assistant/message', seq,
+  time: CREATED + seq * 1000, data: { message: { role: 'assistant', content: [],
+    source: { kind: 'model', provider, model: 'm', replayState: { response: { responseId } } } },
+  usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 } } });
+const replay = summarizeSession(writeSession(replayRoot, '--work-project--', REPLAY_ID, [
+  { type: 'session', version: 3, id: REPLAY_ID, createdAt: CREATED, cwd: '/work/project' },
+  call(1, 'openrouter', 'gen-1'), call(2, 'openrouter', 'gen-1'), call(3, 'anthropic', 'msg-2')
+]));
+check('a replayed generation is one message and adds its tokens once',
+  [replay.messages, replay.tokens], [2, 30]);
+check('a call through another provider has no generation to bill',
+  replay.billingCalls.map(billingCall => billingCall.responseId), ['gen-1', null]);
+fs.rmSync(replayRoot, { recursive: true, force: true });
+
 // A writer that crashed mid-append and was resumed leaves a torn frame with
 // whole frames after it; skippable frames carry no records.
 const resumedRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-backend-test-'));
@@ -242,6 +259,14 @@ const billingCheck = (async () => {
   delete process.env.CLAUDE_PROFILER_OFFLINE;
   check('offline leaves DSH tokens without a cost',
     offline.every(session => session.cost === null), true);
+
+  // A refused key would be refused for every generation: stop asking.
+  let attempts = 0;
+  const refused = await fetchBilling(Array.from({ length: 40 }, (_, i) => `gen-${i}`), {
+    root, useCache: false,
+    fetchImpl: async () => { attempts++; return { ok: false, status: 401 }; } });
+  check('a refused key stops the billing requests',
+    [refused.size, attempts <= 8], [0, true]);
 
   // A session without any model call has nothing to bill.
   check('a session with no model call stays unpriced',

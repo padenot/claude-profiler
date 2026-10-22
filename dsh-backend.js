@@ -258,6 +258,7 @@ function summarizeSession(file) {
   let messages = 0;
   const models = {};
   const billingCalls = [];
+  const seenResponses = new Set();
   const usage = emptyUsage();
 
   for (const entry of entries) {
@@ -274,18 +275,23 @@ function summarizeSession(file) {
     }
 
     if (entry.type === 'assistant/message') {
-      messages++;
       const source = entry.data?.message?.source;
+      const responseId = source?.replayState?.response?.responseId || null;
+      // A replayed model call is the same generation recorded again: it is
+      // one message, and its tokens count once, as its cost does.
+      if (responseId && seenResponses.has(responseId)) continue;
+      seenResponses.add(responseId);
+      messages++;
       const messageModel = source?.model || model || 'Unknown model';
       model = source?.model || model;
       const messageTokens = messageUsage(entry);
       if (messageTokens) {
         addUsage(usage, messageTokens);
         addUsage(models[messageModel] ||= emptyUsage(), messageTokens);
-        billingCalls.push({
-          responseId: source?.replayState?.response?.responseId || null,
-          model: messageModel
-        });
+        // Only OpenRouter can bill a generation id. A call through another
+        // provider has no id to look up, which leaves the session's cost blank.
+        const billable = !source?.provider || source.provider === 'openrouter';
+        billingCalls.push({ responseId: billable ? responseId : null, model: messageModel });
       }
     }
   }
@@ -435,6 +441,10 @@ function openRouterKey(root = dshDir()) {
   }
 }
 
+// What fetchGenerationCost returns when OpenRouter refuses the key, which
+// would refuse every other generation too.
+const REJECTED = Symbol('rejected');
+
 async function fetchGenerationCost(id, { key, fetchImpl }) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), OPENROUTER_TIMEOUT_MS);
@@ -446,6 +456,7 @@ async function fetchGenerationCost(id, { key, fetchImpl }) {
         signal: controller.signal,
         headers: { Authorization: `Bearer ${key}` }
       });
+    if (response.status === 401 || response.status === 403) return REJECTED;
     if (!response.ok) return null;
 
     const data = (await response.json())?.data;
@@ -499,10 +510,15 @@ async function fetchBilling(ids, {
   const key = pending.length > 0 ? openRouterKey(root) : null;
   if (!key) return billing;
 
-  const rows = await mapLimit(pending, OPENROUTER_CONCURRENCY,
-    id => fetchGenerationCost(id, { key, fetchImpl }));
+  let rejected = false;
+  const rows = await mapLimit(pending, OPENROUTER_CONCURRENCY, async id => {
+    if (rejected) return null;
+    const row = await fetchGenerationCost(id, { key, fetchImpl });
+    if (row === REJECTED) rejected = true;
+    return row;
+  });
   rows.forEach((row, index) => {
-    if (!row) return;
+    if (!row || row === REJECTED) return;
     if (useCache) generationCosts.set(pending[index], row);
     billing.set(pending[index], row);
   });
@@ -521,8 +537,9 @@ async function addBilling(sessions, options = {}) {
     const sessionCalls = session.billingCalls || [];
     if (sessionCalls.length === 0) continue;
 
-    // One model call can be replayed into more than one record; bill the
-    // generation once and attribute it to the model that made it.
+    // The calls of a root and its sub-agents are billed together, so a
+    // generation recorded in more than one of them is billed once, and
+    // attributed to the model that made it.
     const modelByGeneration = new Map();
     const complete = sessionCalls.every(call => {
       if (!call.responseId) return false;
