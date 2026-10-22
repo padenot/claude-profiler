@@ -336,6 +336,9 @@ are the exact backend dollar amounts; their distribution over time follows
 the cumulative usage snapshots recorded in the rollout. Token and credit
 details stay inside profile markers rather than adding columns to the compact
 session table.
+A thread without billing data, offline or for an old thread, keeps its timeline
+but has no cost graphs, and `Total Cost ($)` is only drawn when every thread
+has one.
 
 ## Use as a library
 

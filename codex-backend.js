@@ -134,6 +134,13 @@ function addModels(into, models) {
   }
 }
 
+// The backend returns all-zero placeholder billing rows for old threads that
+// still have substantial recorded token usage. Zero there means the estimate is
+// unavailable, not that those tokens were free.
+function isBillingPlaceholder(tokens, usdMicros, creditsMicros) {
+  return tokens > 0 && usdMicros === 0 && creditsMicros === 0;
+}
+
 function summarizeSession(file, titles = new Map()) {
   const stat = statSafe(file);
   const entries = readJsonlFile(file);
@@ -375,10 +382,7 @@ async function addBilling(sessions, options = {}) {
       (sum, row) => sum + row.estimated_usage_credits_micros, 0);
     const costMicros = rows.reduce(
       (sum, row) => sum + row.estimated_usage_usd_micros, 0);
-    // The backend returns all-zero placeholder billing rows for old threads
-    // that still have substantial recorded token usage. Zero there means the
-    // estimate is unavailable, not that those tokens were free.
-    if (session.tokens > 0 && creditsMicros === 0 && costMicros === 0) continue;
+    if (isBillingPlaceholder(session.tokens, costMicros, creditsMicros)) continue;
     session.credits = creditsMicros / 1000000;
     session.cost = costMicros / 1000000;
 
@@ -436,9 +440,8 @@ async function addBilling(sessions, options = {}) {
       threadsByModel.get(thread.model).push({ ...thread, row: billingById.get(thread.id) });
     }
     for (const [model, threads] of threadsByModel) {
-      const complete = threads.every(({ row, tokens }) => row &&
-        !(tokens > 0 && row.estimated_usage_usd_micros === 0 &&
-          row.estimated_usage_credits_micros === 0));
+      const complete = threads.every(({ row, tokens }) => row && !isBillingPlaceholder(
+        tokens, row.estimated_usage_usd_micros, row.estimated_usage_credits_micros));
       if (!complete || !session.models[model]) continue;
       session.models[model].cost = threads.reduce(
         (sum, { row }) => sum + row.estimated_usage_usd_micros, 0) / 1000000;
@@ -458,6 +461,7 @@ module.exports = {
   listSessionsWithUsage,
   addBilling,
   fetchBilling,
+  isBillingPlaceholder,
   summarizeSession,
   sessionTitles,
   sessionTree

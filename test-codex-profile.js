@@ -82,4 +82,21 @@ assert(profile.threads[0].markers.startTime.every(Number.isFinite));
 assert(profile.threads[0].markers.endTime.every(Number.isFinite));
 
 console.log('ok   builds Codex turns, tools, usage, and subagent tracks');
+const unbilled = createCodexProfile(tree, new Map([['child', billing.get('child')]]));
+const unbilledTypes = thread => thread.markers.data.map(marker => marker.type);
+assert.strictEqual(unbilled.threads.length, 2);
+assert(!unbilledTypes(unbilled.threads[0]).includes('ThreadCost'));
+assert(!unbilledTypes(unbilled.threads[0]).includes('ResponseCost'));
+assert(!unbilledTypes(unbilled.threads[0]).includes('TotalCost'));
+assert(unbilledTypes(unbilled.threads[0]).includes('ModelResponse'));
+assert(unbilledTypes(unbilled.threads[1]).includes('ThreadCost'));
+assert.strictEqual(createCodexProfile(tree, new Map()).threads.length, 2);
+console.log('ok   threads without billing data keep their timeline but no cost graphs');
+
+const placeholder = createCodexProfile(tree, new Map([...billing, ['root', {
+  estimated_usage_credits_micros: 0, estimated_usage_usd_micros: 0 }]]));
+assert(!unbilledTypes(placeholder.threads[0]).includes('ThreadCost'));
+assert(!unbilledTypes(placeholder.threads[0]).includes('TotalCost'));
+console.log('ok   an all-zero billing placeholder draws no cost graphs');
+
 console.log('\nall passed');

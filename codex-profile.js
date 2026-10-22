@@ -2,6 +2,8 @@
 // rollouts record completed items with exact start/end times; older point
 // events are kept as text markers so their history remains inspectable too.
 
+const { isBillingPlaceholder } = require('./codex-backend.js');
+
 function timestamp(value) {
   if (value === null || value === undefined || value === '') return null;
   const time = typeof value === 'number' ? value : new Date(value).getTime();
@@ -294,7 +296,6 @@ function createShared(strings, intern) {
 
 function createCodexProfile(tree, billing) {
   if (!tree?.length) throw new Error('No Codex thread found');
-  if (!(billing instanceof Map)) throw new Error('Codex billing data is required');
   const allTimes = tree.flatMap(({ entries }) => entries.map(entry => timestamp(entry.timestamp)))
     .filter(time => time !== null);
   if (!allTimes.length) throw new Error('No timestamped events found in Codex rollout');
@@ -314,11 +315,24 @@ function createCodexProfile(tree, billing) {
     return String(a.session.started).localeCompare(String(b.session.started));
   });
 
+  // Billing is best-effort: offline, signed out, or for an old thread the
+  // backend has no row, or an all-zero placeholder for a thread that did use
+  // tokens. Such a thread keeps its timeline but has no cost graphs, and the
+  // root's total is only drawn when every thread has a cost.
+  const billed = new Map();
+  for (const { session, entries } of tracks) {
+    const row = billing.get(session.id);
+    if (row && !isBillingPlaceholder(usageOf(entries).total_tokens,
+      row.estimated_usage_usd_micros, row.estimated_usage_credits_micros)) {
+      billed.set(session.id, row);
+    }
+  }
+
   const costs = new Map();
   const totalDeltas = [];
   for (const track of tracks) {
-    const billingRow = billing.get(track.session.id);
-    if (!billingRow) throw new Error(`Missing dollar cost for Codex thread ${track.session.id}`);
+    const billingRow = billed.get(track.session.id);
+    if (!billingRow) continue;
     const times = track.entries.map(entry => timestamp(entry.timestamp)).filter(time => time !== null);
     const points = costPoints(track.entries, billingRow, Math.min(...times), Math.max(...times));
     costs.set(track.session.id, points);
@@ -334,7 +348,7 @@ function createCodexProfile(tree, billing) {
   totalDeltas.sort((a, b) => a.at - b.at);
   let totalCost = 0;
   let totalCredits = 0;
-  const totalPoints = totalDeltas.map(point => {
+  const totalPoints = billed.size === tracks.length && totalDeltas.map(point => {
     totalCost += point.cost;
     totalCredits += point.credits;
     return { at: point.at, cost: totalCost, credits: totalCredits };
@@ -533,7 +547,7 @@ function createCodexProfile(tree, billing) {
       add('Output Tokens', responseStart, response.at, 5, { type: 'OutputTokens',
         tokens: usage.output_tokens || 0,
         reasoningTokens: usage.reasoning_output_tokens || 0 });
-      add('Response Cost ($)', responseStart, response.at, 5, {
+      if (threadCostPoints) add('Response Cost ($)', responseStart, response.at, 5, {
         type: 'ResponseCost',
         cost: Math.max(0, costAt(response.at) - costAt(previous)),
         inputTokens: usage.input_tokens || 0,
@@ -564,21 +578,20 @@ function createCodexProfile(tree, billing) {
           .find(event => event.label === 'User')?.text || '';
         add('Activity', span.start, Math.max(span.start + 1, span.end), 1, {
           type: 'Activity', prompt: prompt.replace(/\s+/g, ' ').slice(0, 300),
-          cost: Math.max(0, costAt(span.end) - costAt(span.start))
+          cost: threadCostPoints && Math.max(0, costAt(span.end) - costAt(span.start))
         });
       }
     }
 
-    const billingRow = billing.get(session.id);
+    const billingRow = billed.get(session.id);
     const usage = usageOf(entries);
     add('Usage', trackEnd, trackEnd, 0, { type: 'Usage',
       totalTokens: usage.total_tokens || 0, inputTokens: usage.input_tokens || 0,
       cachedTokens: usage.cached_input_tokens || 0, outputTokens: usage.output_tokens || 0,
-      credits: billingRow.estimated_usage_credits_micros / 1000000,
-      cost: billingRow.estimated_usage_usd_micros / 1000000 });
-    addCostGraph(costs.get(session.id), 'Thread Cost ($)',
-      'ThreadCost', trackEnd);
-    if (index === 0) {
+      credits: billingRow && billingRow.estimated_usage_credits_micros / 1000000,
+      cost: billingRow && billingRow.estimated_usage_usd_micros / 1000000 });
+    if (threadCostPoints) addCostGraph(threadCostPoints, 'Thread Cost ($)', 'ThreadCost', trackEnd);
+    if (index === 0 && totalPoints) {
       addCostGraph(totalPoints, 'Total Cost ($)', 'TotalCost', profileEnd);
     }
 

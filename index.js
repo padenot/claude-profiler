@@ -2086,12 +2086,9 @@ async function buildCodexProfile(id) {
   const tree = sessionTree(id);
   if (!tree) throw new Error(`Unknown Codex session ${id}`);
 
-  // Keep the authoritative billing row for every thread: the profile uses these
-  // to draw both per-thread dollars and a session-wide total on the root.
+  // The profile draws per-thread dollars and a session-wide total on the root
+  // from these rows, and leaves the cost graphs out for threads without one.
   const billing = await fetchBilling(tree.map(track => track.session.id));
-  if (billing.size !== tree.length) {
-    throw new Error(`Billing API returned ${billing.size}/${tree.length} Codex threads`);
-  }
   const { createCodexProfile } = require('./codex-profile.js');
   return Buffer.from(JSON.stringify(createCodexProfile(tree, billing)), 'utf8');
 }
