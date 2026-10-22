@@ -8,7 +8,7 @@ tools ran and for how long, and what the sub-agents were up to.
 Claude Code writes sessions under `~/.claude/projects/`; Codex writes them under
 `~/.codex/sessions/`. Both hold timestamps and usage data, but reading JSONL by
 hand does not make sessions easy to compare. The picker normalizes both formats
-into one start-time-sorted page and labels every row by provider.
+into one page, most recently active first, and labels every row by provider.
 
 ## Install
 
@@ -35,7 +35,7 @@ list in a browser, so there is no file to go looking for:
 claude-profiler
 ```
 
-Each row is a session — what it was about, where it ran, when it started, how
+Each row is a session — what it was about, where it ran, when it was last active, how
 long it actually worked, and its measured usage. Every row has a **Profiler**
 button. Claude rows report calculated dollar cost; for a signed-in Enterprise
 account, Codex rows report the backend's Enterprise dollar estimate and credit
@@ -80,8 +80,8 @@ Press Ctrl+C to stop.
 ```
 
 The page interleaves sessions under `~/.claude/projects/` and
-`~/.codex/sessions/`, newest start first. A row carries its provider, title,
-working directory and branch, start time, active time, message and sub-agent
+`~/.codex/sessions/`, most recently active first. A row carries its provider, title,
+working directory and branch, last activity, active time, message and sub-agent
 counts, size on disk, and dollar cost. Cost is banded so expensive
 sessions stand out.
 

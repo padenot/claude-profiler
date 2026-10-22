@@ -330,7 +330,7 @@ function sessionRow(session, maxCost) {
     `<td class="title">
        <span class="dot s${session.colorSlot}"></span><span class="provider ${provider}">${providerLabel}</span>${escapeHtml(session.title)}
      </td>`,
-    `<td class="date" data-value="${escapeHtml(session.started || '')}"></td>`,
+    `<td class="date" data-value="${escapeHtml(session.ended || '')}"></td>`,
     `<td class="num">${formatDuration(session.active)}</td>`,
     `<td class="num">${session.messages.toLocaleString()}</td>`,
     `<td class="num">${session.subagents || '—'}</td>`,
@@ -347,7 +347,7 @@ function sessionRow(session, maxCost) {
   // rather than by the formatted text ("9 MB" would sort above "10 MB").
   const keys = [
     session.title.toLowerCase(),
-    session.started || '',
+    session.ended || '',
     session.active,
     session.messages,
     session.subagents,
@@ -386,7 +386,7 @@ function sessionRow(session, maxCost) {
 
 const COLUMNS = [
   { label: 'Session', className: 'title' },
-  { label: 'Started', className: 'date' },
+  { label: 'Last active', className: 'date' },
   { label: 'Active', className: 'num' },
   { label: 'Messages', className: 'num' },
   { label: 'Sub-agents', className: 'num' },

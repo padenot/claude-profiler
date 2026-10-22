@@ -194,9 +194,9 @@ check('the size sort key is a byte count',
   [...html.matchAll(/data-sort5="([^"]*)"/g)].map(m => m[1]).every(k => !isNaN(k)),
   true);
 
-check('the date column sorts on when the session started',
+check('the date column sorts on when the session was last active',
   [...html.matchAll(/data-sort1="([^"]*)"/g)].map(m => m[1]),
-  [sessions[0].started, sessions[1].started]);
+  [sessions[0].ended, sessions[1].ended]);
 
 // The first sort() call must not reverse a sort that has not happened yet.
 check('no column is marked sorted before the first sort',
@@ -375,7 +375,7 @@ check('the script reorders the groups', html.includes('table.append(...sorted)')
 // few characters wide in a narrow window and breaks a path down it.
 check('the path is a full-width row under the figures',
   new RegExp(`<tr class="path">\\s*<td colspan="${
-    ['Session','Started','Active','Messages','Sub-agents','Size','Cost','']
+    ['Session','Last active','Active','Messages','Sub-agents','Size','Cost','']
       .length - 3}"`).test(html), true);
 
 check('the path row carries the working directory and branch',

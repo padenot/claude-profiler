@@ -2004,7 +2004,7 @@ async function runJsonMode(command, id, options) {
     // `file` is a path on this machine, which means nothing to the caller and
     // would be misleading in its UI; the id is what it addresses sessions by.
     const sessions = [...listSessions(deps), ...(await listCodexSessions())]
-      .sort((a, b) => (b.started || '').localeCompare(a.started || ''))
+      .sort((a, b) => (b.ended || '').localeCompare(a.ended || ''))
       .map(({ file, billingThreadIds, billingThreads, parentId, internal, ...rest }) => rest);
     process.stdout.write(JSON.stringify({ sessions }));
     return;
@@ -2230,7 +2230,7 @@ function localSource() {
       const codex = nextCodexSessions();
       const claude = listSessions(deps);
       return [...claude, ...(await codex)]
-        .sort((a, b) => (b.started || '').localeCompare(a.started || ''));
+        .sort((a, b) => (b.ended || '').localeCompare(a.ended || ''));
     },
 
     stamp: async (id) => {

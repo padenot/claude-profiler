@@ -261,7 +261,7 @@ function listSessions({ root = codexDir() } = {}) {
     root.billingThreads.push(...session.billingThreads);
   }
 
-  return roots.sort((a, b) => (b.started || '').localeCompare(a.started || ''));
+  return roots.sort((a, b) => (b.ended || '').localeCompare(a.ended || ''));
 }
 
 // Read one visible thread and every sub-agent descended from it. Profiles need
