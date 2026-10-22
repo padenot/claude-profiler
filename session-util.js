@@ -1,5 +1,5 @@
-// Helpers shared by the Claude and Codex session backends, and by the profile
-// builders that read the same files.
+// Helpers shared by the Claude, Codex and DSH session backends, and by the
+// profile builders that read the same files.
 
 const fs = require('fs');
 
@@ -19,8 +19,12 @@ function statSafe(file) {
 }
 
 // `mapLine` lets a caller rewrite a line's text before it is parsed.
-function readJsonlFile(file, mapLine = line => line) {
-  const lines = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean);
+function readJsonlFile(file, mapLine) {
+  return parseJsonl(fs.readFileSync(file, 'utf8'), mapLine);
+}
+
+function parseJsonl(text, mapLine = line => line) {
+  const lines = text.split('\n').filter(Boolean);
   return lines.map((line, i) => {
     try {
       return JSON.parse(mapLine(line));
@@ -39,16 +43,19 @@ function readJsonlFile(file, mapLine = line => line) {
 // 142 hours of which six minutes were work. Summing only the gaps short
 // enough to be the session working — the same distinction the timeline draws
 // as its Idle category — is what makes the column comparable between rows.
-function activity(entries) {
+// `timeOf` gives an entry's time as a date string or a millisecond count, and
+// `first` and `last` are returned as given.
+function activity(entries, timeOf = entry => entry.timestamp) {
   let first = null;
   let last = null;
   let active = 0;
   let previous = null;
   for (const entry of entries) {
-    if (!entry.timestamp) continue;
-    first = first || entry.timestamp;
-    last = entry.timestamp;
-    const at = new Date(entry.timestamp).getTime();
+    const time = timeOf(entry);
+    if (!time) continue;
+    first = first || time;
+    last = time;
+    const at = new Date(time).getTime();
     if (previous !== null && at > previous && at - previous <= ACTIVE_GAP) {
       active += at - previous;
     }
@@ -79,5 +86,5 @@ function addUsage(into, usage, keys = Object.keys(into)) {
 }
 
 module.exports = {
-  ACTIVE_GAP, statSafe, readJsonlFile, activity, byLastActive, addUsage, addModels
+  ACTIVE_GAP, statSafe, readJsonlFile, parseJsonl, activity, byLastActive, addUsage, addModels
 };

@@ -127,6 +127,24 @@ check('lists newest session first',
   sessions.every((session, i) =>
     i === 0 || (sessions[i - 1].ended || '') >= (session.ended || '')), true);
 
+// A parent that only spawned an agent still carries what the agent used.
+const quietRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-backend-test-'));
+const QUIET_ID = 'session-33333333-3333-4333-8333-333333333333';
+writeSession(quietRoot, '--work-project--', QUIET_ID, [
+  { type: 'session', version: 3, id: QUIET_ID, createdAt: CREATED, cwd: '/work/project' }
+]);
+writeSession(quietRoot, '--work-project--', CHILD_ID, [
+  { type: 'session', version: 3, id: CHILD_ID, createdAt: CREATED + 10000,
+    cwd: '/work/project', parentSession: QUIET_ID },
+  { type: 'assistant/message', seq: 1, time: CREATED + 11000, data: {
+    message: { role: 'assistant', id: 'a3', content: [] },
+    usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 } } }
+]);
+check('a root that only spawned agents keeps their usage',
+  listSessions({ root: quietRoot }).map(session => [session.id, session.tokens, session.subagents]),
+  [[QUIET_ID, 15, 1]]);
+fs.rmSync(quietRoot, { recursive: true, force: true });
+
 const tree = sessionTree(ROOT_ID, { root });
 check('a session tree holds the root and its sub-agent',
   tree.map(track => track.session.id).sort(), [ROOT_ID, CHILD_ID].sort());

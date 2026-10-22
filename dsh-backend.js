@@ -7,10 +7,9 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const zlib = require('zlib');
-
-// A gap longer than this is the session waiting for its user rather than
-// working, the same distinction the Claude and Codex backends draw.
-const ACTIVE_GAP = 60 * 1000;
+const {
+  statSafe, parseJsonl, activity, byLastActive, addUsage, addModels
+} = require('./session-util.js');
 
 // The canonical generation log names: session.jsonl for format zero, then
 // session.vN.jsonl, each optionally Zstandard-compressed. Temporary and
@@ -19,14 +18,6 @@ const LOG_NAME = /^session(?:\.v([1-9][0-9]*))?\.jsonl(\.zstd)?$/;
 
 function dshDir() {
   return process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
-}
-
-function statSafe(file) {
-  try {
-    return fs.statSync(file);
-  } catch {
-    return null;
-  }
 }
 
 // The current generation of one session directory. A directory can hold more
@@ -159,21 +150,6 @@ function decompressZstd(buffer) {
   return Buffer.concat(parts).toString('utf8');
 }
 
-function readJsonlText(text) {
-  const lines = text.split('\n').filter(Boolean);
-  return lines.map((line, i) => {
-    try {
-      return JSON.parse(line);
-    } catch (error) {
-      // The last write of a live session can be observed halfway through. Its
-      // complete records are still a valid summary; corruption in the middle
-      // of a file is not.
-      if (i === lines.length - 1) return null;
-      throw error;
-    }
-  }).filter(Boolean);
-}
-
 // One session's records, oldest first. Reads the whole log: DSH's own
 // projections do the same, and a session that has to be summarized has to be
 // read anyway.
@@ -182,7 +158,7 @@ function readSessionFile(file) {
   const text = file.endsWith('.zstd')
     ? decompressZstd(buffer)
     : buffer.toString('utf8');
-  return readJsonlText(text);
+  return parseJsonl(text);
 }
 
 function emptyUsage() {
@@ -193,16 +169,6 @@ function emptyUsage() {
     outputTokens: 0,
     totalTokens: 0
   };
-}
-
-function addUsage(into, usage) {
-  for (const key of Object.keys(into)) into[key] += usage?.[key] || 0;
-}
-
-function addModels(into, models) {
-  for (const [model, usage] of Object.entries(models)) {
-    addUsage(into[model] ||= emptyUsage(), usage);
-  }
 }
 
 // DSH's inputTokens is the newly processed input and is disjoint from
@@ -271,10 +237,9 @@ function summarizeSession(file) {
   const id = header.id || path.basename(path.dirname(file));
   const createdAt = Number.isFinite(header.createdAt) ? header.createdAt : null;
 
-  let started = createdAt;
-  let ended = null;
-  let active = 0;
-  let previous = null;
+  const { first, last: ended, active } =
+    activity(entries, entry => Number.isFinite(entry.time) ? entry.time : null);
+  const started = createdAt ?? first;
   let title = null;
   let model = '';
   let messages = 0;
@@ -283,16 +248,6 @@ function summarizeSession(file) {
   const usage = emptyUsage();
 
   for (const entry of entries) {
-    const at = Number.isFinite(entry.time) ? entry.time : null;
-    if (at !== null) {
-      if (started === null) started = at;
-      ended = at;
-      if (previous !== null && at > previous && at - previous <= ACTIVE_GAP) {
-        active += at - previous;
-      }
-      previous = at;
-    }
-
     // The last title wins: session/title is rewritten as the provider's own
     // title replaces the fallback one.
     if (entry.type === 'session/title' && entry.data?.title) {
@@ -365,10 +320,6 @@ function listSessions({ root = dshDir() } = {}) {
   }
 
   const byId = new Map(sessions.map(session => [session.id, session]));
-  const roots = sessions.filter(session =>
-    !session.parentId && (session.messages > 0 || session.tokens > 0));
-  const rootIds = new Set(roots.map(session => session.id));
-
   for (const session of sessions) {
     if (!session.parentId) continue;
 
@@ -381,18 +332,22 @@ function listSessions({ root = dshDir() } = {}) {
       seen.add(root.id);
       root = byId.get(root.parentId);
     }
-    if (!root || !rootIds.has(root.id)) continue;
+    if (!root || root.parentId) continue;
 
     root.subagents++;
     root.bytes += session.bytes;
     root.entries += session.entries;
     addUsage(root.usage, session.usage);
-    addModels(root.models, session.models);
+    addModels(root.models, session.models, emptyUsage);
     root.tokens = root.usage.totalTokens;
     root.billingCalls.push(...session.billingCalls);
   }
 
-  return roots.sort((a, b) => (b.ended || '').localeCompare(a.ended || ''));
+  // Filtered once sub-agent usage is folded in, so that a root which only
+  // spawned agents still carries what they used.
+  return sessions.filter(session =>
+    !session.parentId && (session.messages > 0 || session.tokens > 0)
+  ).sort(byLastActive);
 }
 
 // Read one root session and every sub-agent descended from it. Profiles need
