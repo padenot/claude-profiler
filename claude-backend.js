@@ -106,14 +106,12 @@ function addUsage(into, usage) {
 }
 
 // Claude can write several streaming snapshots for one request. As with the
-// cost calculation, only the final snapshot belongs in the totals.
+// cost calculation, only the final snapshot belongs in the totals, and a call
+// without a requestId is left out of both so that tokens and dollars agree.
 function usageByModel(messages, totalCost) {
   const calls = new Map();
   for (const message of messages) {
-    const usage = message.message?.usage;
-    if (!usage) continue;
-    const key = message.requestId || message.uuid;
-    if (key) calls.set(key, message);
+    if (message.message?.usage && message.requestId) calls.set(message.requestId, message);
   }
 
   const models = {};

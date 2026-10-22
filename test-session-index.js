@@ -433,6 +433,21 @@ check('a blocked popup falls back to this window',
 check('the session id is encoded into the request URL',
   html.includes("encodeURIComponent(button.dataset.id)"), true);
 
+// A call with usage but no requestId costs nothing in totalCost, so its tokens
+// stay out of the model breakdown too.
+fs.mkdirSync(path.join(root, '-Users-me-buildgit-norequest'));
+const noRequestRoot = path.join(root, '-Users-me-buildgit-norequest');
+fs.writeFileSync(path.join(noRequestRoot, 'nnnn.jsonl'), [
+  { type: 'user', message: { role: 'user', content: 'hi' }, timestamp: at(0) },
+  { type: 'assistant', requestId: 'request-1', timestamp: at(1), message: { role: 'assistant',
+    model: 'claude-test', usage: { input_tokens: 10, output_tokens: 2 } } },
+  { type: 'assistant', uuid: 'u3', timestamp: at(2), message: { role: 'assistant',
+    model: 'claude-test', usage: { input_tokens: 1000, output_tokens: 200 } } }
+].map(e => JSON.stringify(e)).join('\n') + '\n');
+check('calls without a requestId add no model tokens',
+  listSessions(deps, { root }).find(session => session.id === 'nnnn').models['claude-test']
+    .input_tokens, 10);
+
 fs.rmSync(root, { recursive: true, force: true });
 
 // --- Opening a browser -----------------------------------------------------
