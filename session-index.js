@@ -30,6 +30,7 @@ function escapeHtml(text) {
 
 function formatBytes(bytes) {
   if (bytes >= 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024 / 1024).toFixed(1)} GB`;
+  if (bytes >= 100 * 1024 * 1024) return `${Math.round(bytes / 1024 / 1024)} MB`;
   if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
   if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
   return `${bytes} B`;
@@ -193,6 +194,15 @@ function effectiveRateCell(total) {
   return `<div role="cell" title="${detail}">${formatted}</div>`;
 }
 
+// A provider and the model rows it expands into, which move together when the
+// providers are sorted.
+function usageGroup(provider) {
+  return `<div class="usage-group" role="rowgroup" ${usageSortAttributes(provider)}>
+    ${usageRow(provider, `usage-provider ${provider.provider}`, provider.models.length > 0)}
+    ${provider.models.map(model => usageRow(model, 'usage-model')).join('')}
+  </div>`;
+}
+
 const USAGE_COLUMNS = [
   { label: 'Usage' },
   { label: 'Est. cost', title: 'Claude price calculation or Codex Enterprise API dollar estimate' },
@@ -206,11 +216,11 @@ const USAGE_COLUMNS = [
   { label: 'Est. $/M', title: 'Estimated cost divided by input plus output tokens, normalized to one million tokens' }
 ];
 
-function usageHeader(target) {
+function usageHeader() {
   return `<div class="usage-row usage-head" role="row">
     ${USAGE_COLUMNS.map((column, index) =>
-      `<div role="columnheader" tabindex="0" data-usage-column="${index}" ` +
-      `data-usage-target="${target}"${column.title ? ` title="${escapeHtml(column.title)}"` : ''}>` +
+      `<div role="columnheader" tabindex="0" data-usage-column="${index}"` +
+      `${column.title ? ` title="${escapeHtml(column.title)}"` : ''}>` +
       `${escapeHtml(column.label)}</div>`).join('')}
   </div>`;
 }
@@ -234,11 +244,10 @@ function usageSortAttributes(total) {
     `data-usage-sort${index}="${escapeHtml(key)}"`).join(' ');
 }
 
-function usageRow(total, className = '') {
-  const showProvider = total.provider && className.includes('usage-model');
-  return `<div class="usage-row ${className}" role="row" ${usageSortAttributes(total)}>
-    <div class="usage-label" role="rowheader">${escapeHtml(total.label)}${showProvider
-      ? ` <span class="provider ${total.provider}">${escapeHtml(total.provider)}</span>` : ''}</div>
+function usageRow(total, className = '', expandable = false) {
+  return `<div class="usage-row ${className}" role="row" ${usageSortAttributes(total)}${
+    expandable ? ' tabindex="0" aria-expanded="false"' : ''}>
+    <div class="usage-label" role="rowheader">${escapeHtml(total.label)}</div>
     <div role="cell"${total.costComplete ? '' : ' title="Some costs are unavailable"'}>${formatTotalCost(total)}</div>
     ${creditCell(total)}
     ${tokenCell(total.input)}
@@ -290,13 +299,10 @@ function usageSummary(sessions) {
       modelEntries.filter(exact).reduce((sum, [, modelUsage]) => sum + modelUsage.cost, 0));
 
     modelEntries.forEach(([model, modelUsage], index) => {
-      // A model row is a cost comparison. If this session has no billing data,
-      // exclude both its cost and tokens so the row keeps one coherent
-      // denominator. Provider and overall rows above still retain all usage.
-      if (!Number.isFinite(modelUsage?.cost) &&
-          (session.cost === null || session.cost === undefined)) return;
+      // An unpriced session's tokens still count; its cost is unknown, which
+      // the row shows, and the $/M figure only divides the priced ones.
       const key = `${provider}:${model}`;
-      if (!models.has(key)) models.set(key, emptyTotals(model, provider));
+      if (!models.has(key)) models.set(key, emptyTotals(modelLabel(model), provider));
       const share = weightTotal > 0 ? weights[index] / weightTotal : 1 / unattributed;
       const modelCost = Number.isFinite(modelUsage?.cost)
         ? modelUsage.cost
@@ -306,9 +312,40 @@ function usageSummary(sessions) {
     });
   }
 
-  return { total, providers: Object.values(providers), models: [...models.values()]
-    .filter(model => model.input + model.output > 0 || model.cost > 0)
-    .sort((a, b) => b.cost - a.cost || a.label.localeCompare(b.label)) };
+  const used = totals => totals.input + totals.output > 0 || totals.cost > 0;
+  return { total, providers: Object.values(providers).filter(used).map(provider => ({
+    ...provider,
+    models: [...models.values()]
+      .filter(model => model.provider === provider.provider && used(model))
+      .sort((a, b) => b.cost - a.cost || a.label.localeCompare(b.label))
+  })) };
+}
+
+// In a provider's model rows, the provider's name is already on the row above.
+function modelLabel(model) {
+  return model.replace(/^claude-/, '');
+}
+
+// The models a session used, its sub-agents' included, most used first.
+function sessionModels(session) {
+  const provider = providerOf(session);
+  const models = Object.entries(session.models || {})
+    .map(([model, usage]) => {
+      const tokens = normalizedUsage(provider, usage);
+      return { model, tokens: tokens.input + tokens.output };
+    })
+    .filter(({ tokens }) => tokens > 0)
+    .sort((a, b) => b.tokens - a.tokens)
+    .map(({ model }) => model);
+  return models.length ? models : [session.model].filter(Boolean);
+}
+
+// A count in a narrow column: 7.6K rather than 7,578.
+function formatCount(count) {
+  return count >= 1000
+    ? new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 })
+      .format(count)
+    : String(count);
 }
 
 function formatDuration(ms) {
@@ -356,14 +393,16 @@ function costBar(cost, maxCost) {
 
 function sessionRow(session, maxCost) {
   const provider = providerOf(session);
-  const providerLabel = { codex: 'Codex', dsh: 'DSH', claude: 'Claude' }[provider];
+  const models = sessionModels(session);
   const cells = [
-    `<td class="title">
-       <span class="dot s${session.colorSlot}"></span><span class="provider ${provider}">${providerLabel}</span>${escapeHtml(session.title)}
+    `<td class="title" title="${escapeHtml(session.title)}">
+       <span class="dot s${session.colorSlot}"></span>${escapeHtml(session.title)}
      </td>`,
+    `<td class="model">${models.map(escapeHtml).join('<br>') || '—'}</td>`,
     `<td class="date" data-value="${escapeHtml(session.ended || '')}"></td>`,
     `<td class="num">${formatDuration(session.active)}</td>`,
-    `<td class="num">${session.messages.toLocaleString()}</td>`,
+    `<td class="num" title="${session.messages.toLocaleString('en-US')} messages">${
+      formatCount(session.messages)}</td>`,
     `<td class="num">${session.subagents || '—'}</td>`,
     `<td class="num">${formatBytes(session.bytes)}</td>`,
     `<td class="num cost">${formatCost(session.cost)}</td>`,
@@ -378,6 +417,7 @@ function sessionRow(session, maxCost) {
   // rather than by the formatted text ("9 MB" would sort above "10 MB").
   const keys = [
     session.title.toLowerCase(),
+    models.join(' '),
     session.ended || '',
     session.active,
     session.messages,
@@ -403,8 +443,6 @@ function sessionRow(session, maxCost) {
     <tr class="path">
       <td colspan="${COLUMNS.length - 3}">${escapeHtml(session.cwd)}${
         session.gitBranch ? ` · ${escapeHtml(session.gitBranch)}` : ''
-      }${
-        session.model ? ` · ${escapeHtml(session.model)}` : ''
       }</td>
       <td class="meter" colspan="2">
         <span class="bar ${costBand(session.cost)}"
@@ -417,10 +455,11 @@ function sessionRow(session, maxCost) {
 
 const COLUMNS = [
   { label: 'Session', className: 'title' },
+  { label: 'Model', className: 'model' },
   { label: 'Last active', className: 'date' },
   { label: 'Active', className: 'num' },
-  { label: 'Messages', className: 'num' },
-  { label: 'Sub-agents', className: 'num' },
+  { label: 'Msgs', title: 'Messages', className: 'num' },
+  { label: 'Agents', title: 'Sub-agents', className: 'num' },
   { label: 'Size', className: 'num' },
   { label: 'Cost', className: 'num cost' },
   { label: '', className: 'action', unsortable: true }
@@ -430,7 +469,8 @@ function renderPage(sessions, { size = false, host = null } = {}) {
   const header = COLUMNS.map((column, i) =>
     column.unsortable
       ? `<th class="${column.className}"></th>`
-      : `<th class="${column.className}" data-column="${i}">${escapeHtml(column.label)}</th>`
+      : `<th class="${column.className}" data-column="${i}"${
+        column.title ? ` title="${column.title}"` : ''}>${escapeHtml(column.label)}</th>`
   ).join('');
 
   assignProjectColors(sessions);
@@ -441,7 +481,7 @@ function renderPage(sessions, { size = false, host = null } = {}) {
 
   return `<!DOCTYPE html>
 <meta charset="utf-8">
-<title>Claude, Codex and DSH sessions${host ? ` on ${escapeHtml(host)}` : ''}</title>
+<title>Agent sessions${host ? ` on ${escapeHtml(host)}` : ''}</title>
 <style>
   :root {
     color-scheme: light dark;
@@ -450,6 +490,7 @@ function renderPage(sessions, { size = false, host = null } = {}) {
     --dim: light-dark(#52514e, #c3c2b7);
     --line: light-dark(#e0e0e6, #38383d);
     --hover: light-dark(#f2f6fc, #23262b);
+    --hover-strong: light-dark(#e3ebf7, #2d3238);
     --accent: light-dark(#2a78d6, #3987e5);
 
     /* The cost bands. These are the palette's fixed status colours, which are
@@ -512,17 +553,21 @@ function renderPage(sessions, { size = false, host = null } = {}) {
   .usage-head .desc::after { content: '▼'; }
   .usage-total { font-weight: 700; background: var(--hover); }
   .usage-label { font-weight: 600; }
-  .usage-label .provider { margin-left: .5rem; margin-right: 0; }
-  .usage-models {
-    grid-column: 1 / -1; border-top: 1px solid var(--line);
+  .usage-group { display: contents; }
+  /* A provider with model rows expands into them; the triangle says which do. */
+  .usage-provider[aria-expanded] { cursor: pointer; }
+  /* Darker than the Total row's tint, so the hovered row of a long expanded
+     list stands out even when it is the Total row. */
+  .usage-row:not(.usage-head):hover,
+  .usage-provider[aria-expanded]:focus-visible { background: var(--hover-strong); }
+  .usage-provider .usage-label::before {
+    content: ''; display: inline-block; width: 1em; color: var(--dim);
   }
-  .usage-models summary {
-    cursor: pointer; color: var(--dim); padding: .45rem .7rem; user-select: none;
-  }
-  .usage-models[open] summary { border-bottom: 1px solid var(--line); }
-  .usage-model-grid {
-    display: grid; grid-template-columns: var(--usage-columns);
-  }
+  .usage-provider[aria-expanded] .usage-label::before { content: '▸'; }
+  .usage-provider[aria-expanded="true"] .usage-label::before { content: '▾'; }
+  .usage-model { display: none; color: var(--dim); }
+  .usage-provider[aria-expanded="true"] ~ .usage-model { display: grid; }
+  .usage-model .usage-label { font-weight: 400; padding-left: 1.5em; }
   .options {
     margin-bottom: 1rem; display: flex; align-items: center;
     gap: .5rem 1rem; flex-wrap: wrap;
@@ -559,23 +604,19 @@ function renderPage(sessions, { size = false, host = null } = {}) {
   .num, td.date { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
   th.num, th.date { text-align: right; }
   td.title { font-weight: 500; }
-  th.title, td.title { width: 100%; min-width: 12rem; }
+  /* Every other column is as narrow as its content, and the title takes the
+     rest of the width, on one line; the full title is its tooltip. */
+  th:not(.title) { width: 1%; white-space: nowrap; }
+  td.title { min-width: 12rem; }
   tr.path td { color: var(--dim); font-size: .85em; font-weight: 400; }
+  td.title { max-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   /* A dot beside the title, never colour alone: the project path is spelled
      out on the line below it. */
   .dot {
     display: inline-block; width: .5rem; height: .5rem; border-radius: 50%;
     margin-right: .45rem; vertical-align: baseline; flex: none;
   }
-  .provider {
-    display: inline-block; margin-right: .5rem; padding: .05rem .35rem;
-    border: 1px solid var(--line); border-radius: 3px;
-    color: var(--dim); font-size: .72rem; font-weight: 650;
-    line-height: 1.35; text-transform: uppercase; vertical-align: .05rem;
-  }
-  .provider.codex { color: light-dark(#086b53, #65d6b5); }
-  .provider.claude { color: light-dark(#91451d, #f09a68); }
-  .provider.dsh { color: light-dark(#4a3aa7, #a99cf0); }
+  td.model { color: var(--dim); white-space: nowrap; }
   .s0 { background: var(--s0); } .s1 { background: var(--s1); }
   .s2 { background: var(--s2); } .s3 { background: var(--s3); }
   .s4 { background: var(--s4); } .s5 { background: var(--s5); }
@@ -618,7 +659,7 @@ function renderPage(sessions, { size = false, host = null } = {}) {
   h1 .host { color: var(--accent); }
 </style>
 
-<h1>Claude, Codex and DSH sessions${host ? ` on <span class="host">${escapeHtml(host)}</span>` : ''}</h1>
+<h1>Agent sessions${host ? ` on <span class="host">${escapeHtml(host)}</span>` : ''}</h1>
 <div class="summary">
   <strong>${sessions.length}</strong> session${sessions.length === 1 ? '' : 's'} ·
   <strong>${formatBytes(totalBytes)}</strong>
@@ -626,16 +667,9 @@ function renderPage(sessions, { size = false, host = null } = {}) {
 
 <section class="usage-summary" aria-label="Usage totals">
   <div class="usage-grid" role="table">
-    ${usageHeader('providers')}
+    ${usageHeader()}
     ${usageRow(totals.total, 'usage-total')}
-    ${totals.providers.map(provider => usageRow(provider, `usage-provider ${provider.provider}`)).join('')}
-    ${totals.models.length ? `<details class="usage-models">
-      <summary>By model (${totals.models.length})</summary>
-      <div class="usage-model-grid">
-        ${usageHeader('models')}
-        ${totals.models.map(model => usageRow(model, `usage-model ${model.provider}`)).join('')}
-      </div>
-    </details>` : ''}
+    ${totals.providers.map(usageGroup).join('')}
   </div>
 </section>
 
@@ -655,36 +689,53 @@ function renderPage(sessions, { size = false, host = null } = {}) {
 </div>
 
 ${sessions.length === 0
-  ? `<p class="empty">No Claude, Codex or DSH sessions found${host ? ` on ${escapeHtml(host)}` : ''}.</p>`
+  ? `<p class="empty">No agent sessions found${host ? ` on ${escapeHtml(host)}` : ''}.</p>`
   : `<div class="scroll"><table>
   <thead><tr>${header}</tr></thead>
   ${sessions.map(session => sessionRow(session, maxCost)).join('')}
 </table></div>`}
 
 <script>
-  for (const cell of document.querySelectorAll('td.date')) {
-    const value = cell.dataset.value;
-    cell.textContent = value
-      ? new Date(value).toLocaleString([], {
-          dateStyle: 'medium', timeStyle: 'short'
-        })
-      : '—';
+  // How long ago, which is what the column is read for; the date itself is
+  // the tooltip. Rendered here because only the browser knows the time zone,
+  // and redrawn every minute so that a page left open stays right.
+  function ago(date) {
+    const minutes = Math.floor((Date.now() - date) / 60000);
+    if (minutes < 1) return 'just now';
+    if (minutes < 60) return minutes + ' min ago';
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return hours + 'h ago';
+    const days = Math.floor(hours / 24);
+    if (days < 30) return days + 'd ago';
+    const months = Math.floor(days / 30.44);
+    if (months < 12) return months + (months === 1 ? ' month ago' : ' months ago');
+    const years = Math.floor(days / 365.25);
+    return years + (years === 1 ? ' year ago' : ' years ago');
   }
 
-  // The grand total is a fixed reference point. The top header sorts the two
-  // provider rows beneath it; the repeated header inside <details> sorts model
-  // rows independently, without moving either header or the details element.
-  const usageSortState = {
-    providers: { column: -1, ascending: false },
-    models: { column: -1, ascending: false }
-  };
+  function drawDates() {
+    for (const cell of document.querySelectorAll('td.date')) {
+      const value = cell.dataset.value;
+      if (!value) {
+        cell.textContent = '—';
+        continue;
+      }
+      const date = new Date(value);
+      cell.textContent = ago(date);
+      cell.title = date.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
+    }
+  }
+  drawDates();
+  setInterval(drawDates, 60000);
 
-  function sortUsage(target, column) {
-    const state = usageSortState[target];
-    state.ascending = column === state.column ? !state.ascending : column === 0;
-    state.column = column;
-    const selector = target === 'providers' ? '.usage-provider' : '.usage-model';
-    const rows = [...document.querySelectorAll(selector)].sort((a, b) => {
+  // The grand total is a fixed reference point. The header sorts the
+  // provider rows beneath it, each moving with its model rows, and the model
+  // rows within each provider by the same column.
+  let usageColumn = -1;
+  let usageAscending = false;
+
+  function usageOrder(column) {
+    return (a, b) => {
       const x = a.getAttribute('data-usage-sort' + column);
       const y = b.getAttribute('data-usage-sort' + column);
       // Missing provider-specific values sort last in both directions.
@@ -696,44 +747,47 @@ ${sessions.length === 0
         order = a.getAttribute('data-usage-sort0')
           .localeCompare(b.getAttribute('data-usage-sort0'));
       }
-      return state.ascending ? order : -order;
-    });
+      return usageAscending ? order : -order;
+    };
+  }
 
-    if (target === 'models') {
-      document.querySelector('.usage-model-grid').append(...rows);
-    } else {
-      const grid = document.querySelector('.usage-grid');
-      const details = grid.querySelector('.usage-models');
-      if (details) {
-        for (const row of rows) grid.insertBefore(row, details);
-      } else {
-        grid.append(...rows);
-      }
+  function sortUsage(column) {
+    usageAscending = column === usageColumn ? !usageAscending : column === 0;
+    usageColumn = column;
+    const order = usageOrder(column);
+    const groups = [...document.querySelectorAll('.usage-group')];
+    for (const group of groups) {
+      group.append(...[...group.querySelectorAll('.usage-model')].sort(order));
     }
+    document.querySelector('.usage-grid').append(...groups.sort(order));
 
-    for (const header of document.querySelectorAll(
-      '[data-usage-target="' + target + '"][data-usage-column]'
-    )) {
+    for (const header of document.querySelectorAll('[data-usage-column]')) {
       const active = +header.dataset.usageColumn === column;
-      header.classList.toggle('asc', active && state.ascending);
-      header.classList.toggle('desc', active && !state.ascending);
+      header.classList.toggle('asc', active && usageAscending);
+      header.classList.toggle('desc', active && !usageAscending);
       if (active) {
-        header.setAttribute('aria-sort', state.ascending ? 'ascending' : 'descending');
+        header.setAttribute('aria-sort', usageAscending ? 'ascending' : 'descending');
       } else {
         header.removeAttribute('aria-sort');
       }
     }
   }
 
-  for (const header of document.querySelectorAll('[data-usage-column]')) {
-    const activate = () => sortUsage(header.dataset.usageTarget,
-      +header.dataset.usageColumn);
-    header.addEventListener('click', activate);
-    header.addEventListener('keydown', event => {
+  function onActivate(element, activate) {
+    element.addEventListener('click', activate);
+    element.addEventListener('keydown', event => {
       if (event.key !== 'Enter' && event.key !== ' ') return;
       event.preventDefault();
       activate();
     });
+  }
+
+  for (const header of document.querySelectorAll('[data-usage-column]')) {
+    onActivate(header, () => sortUsage(+header.dataset.usageColumn));
+  }
+  for (const row of document.querySelectorAll('.usage-provider[aria-expanded]')) {
+    onActivate(row, () => row.setAttribute('aria-expanded',
+      row.getAttribute('aria-expanded') === 'true' ? 'false' : 'true'));
   }
 
   // Each session is a <tbody> of two rows — the figures and the path — so the
@@ -772,7 +826,7 @@ ${sessions.length === 0
     th.addEventListener('click', () => sort(+th.dataset.column));
   }
 
-  sort(1);
+  sort(2);
 
   document.addEventListener('click', async (event) => {
     const button = event.target.closest('button[data-id]');

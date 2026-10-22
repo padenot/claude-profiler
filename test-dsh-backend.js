@@ -201,12 +201,11 @@ check('decodes a project key back to a path',
   projectLabel('--Users-me-code--'), '/Users/me/code');
 
 const page = renderPage(sessions);
-check('renders a DSH provider badge', /class="provider dsh">DSH</.test(page), true);
+check('renders the DSH model', page.includes('<td class="model">deepseek/test<br>deepseek/child</td>'), true);
 check('renders a DSH usage row under the provider totals',
   />DSH<[\s\S]*?usage-provider dsh/.test(page) ||
     /usage-provider dsh[\s\S]*?>DSH</.test(page), true);
-check('labels the page for all three providers',
-  page.includes('Claude, Codex and DSH sessions'), true);
+check('titles the page for every agent', page.includes('<h1>Agent sessions</h1>'), true);
 
 const billingCheck = (async () => {
   // The key DSH would use, written where the backend looks for it.

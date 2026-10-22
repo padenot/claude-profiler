@@ -180,23 +180,27 @@ const html = renderPage(sessions);
 // page's `dataset['sort' + column]` found nothing and no column ever sorted.
 const sortAttributes = [...html.matchAll(/data-sort(\d+)=/g)].map(m => m[1]);
 check('rows carry the sort keys the script reads',
-  [...new Set(sortAttributes)].sort(), ['0', '1', '2', '3', '4', '5', '6', '7']);
+  [...new Set(sortAttributes)].sort(), ['0', '1', '2', '3', '4', '5', '6', '7', '8']);
 
 check('the script reads the attribute the rows actually carry',
   html.includes("getAttribute('data-sort' + column)"), true);
 
 // Sorting has to be on the numbers: "9 MB" sorts above "10 MB" as text.
-const costKeys = [...html.matchAll(/data-sort6="([^"]*)"/g)].map(m => m[1]);
+const costKeys = [...html.matchAll(/data-sort7="([^"]*)"/g)].map(m => m[1]);
 check('the cost sort key is the raw number, not the formatted figure',
   costKeys.every(k => k !== '' && !isNaN(k)), true);
 
 check('the size sort key is a byte count',
-  [...html.matchAll(/data-sort5="([^"]*)"/g)].map(m => m[1]).every(k => !isNaN(k)),
+  [...html.matchAll(/data-sort6="([^"]*)"/g)].map(m => m[1]).every(k => !isNaN(k)),
   true);
 
 check('the date column sorts on when the session was last active',
-  [...html.matchAll(/data-sort1="([^"]*)"/g)].map(m => m[1]),
+  [...html.matchAll(/data-sort2="([^"]*)"/g)].map(m => m[1]),
   [sessions[0].ended, sessions[1].ended]);
+
+check('the model column lists the models a session used, sub-agents included',
+  [...html.matchAll(/<td class="model">([^<]*(?:<br>[^<]*)*)<\/td>/g)].map(m => m[1]),
+  ['—', 'claude-test']);
 
 // The first sort() call must not reverse a sort that has not happened yet.
 check('no column is marked sorted before the first sort',
@@ -208,18 +212,29 @@ check('every row has a button carrying its session id',
 
 check('the page offers the --size option', html.includes('id="size"'), true);
 
-check('Claude rows are labeled', html.includes('provider claude">Claude'), true);
+check('narrow columns show compact counts, with the exact figure as a tooltip',
+  renderPage([{ ...sessions[0], messages: 7578 }])
+    .includes('<td class="num" title="7,578 messages">7.6K</td>'), true);
 
-check('a Codex row is labeled, reports cost, and offers its profiler', (() => {
+check('narrow columns have short headers, named in full as tooltips',
+  /title="Messages">Msgs<\/th>[\s\S]*title="Sub-agents">Agents<\/th>/.test(html), true);
+
+check('the last activity is shown as how long ago, with the date as tooltip',
+  html.includes("return minutes + ' min ago'") && html.includes('cell.title = date.toLocaleString'),
+  true);
+
+check('rows carry no provider badge', html.includes('class="provider'), false);
+
+check('a Codex row names its model, reports cost, and offers its profiler', (() => {
   const page = renderPage([{
     ...sessions[0], provider: 'codex', id: 'codex', tokens: 1234,
     credits: 12.5, cost: 1.25,
     profileAvailable: true, usage: {
       input_tokens: 1200, cached_input_tokens: 1000, output_tokens: 34,
       reasoning_output_tokens: 12
-    }
+    }, models: { 'gpt-test': { input_tokens: 1200, output_tokens: 34 } }
   }]);
-  return page.includes('provider codex">Codex') &&
+  return page.includes('<td class="model">gpt-test</td>') &&
     page.includes('>$1.25</td>') && page.includes('data-id="codex:codex"') &&
     !page.includes('Codex tokens') && !page.includes('Codex credits');
 })(), true);
@@ -263,7 +278,7 @@ check('Codex totals use Enterprise API credits and breakdowns', (() => {
       'gpt-enterprise': { ...billingUsage, cost: 2, credits: 28.5 }
     } }]);
   return /usage-provider codex[\s\S]*?>Codex<[\s\S]*?\$2\.00[\s\S]*?28\.5 Enterprise credits">28\.5<[\s\S]*?>1,000<[\s\S]*?>25<[\s\S]*?>200<[\s\S]*?Enterprise API net-new input">200<[\s\S]*?>800</.test(page) &&
-    /usage-model codex[\s\S]*?gpt-enterprise[\s\S]*?28\.5 Enterprise credits">28\.5<[\s\S]*?Enterprise API net-new input">200</.test(page);
+    /usage-model[\s\S]*?gpt-enterprise[\s\S]*?28\.5 Enterprise credits">28\.5<[\s\S]*?Enterprise API net-new input">200</.test(page);
 })(), true);
 
 check('the effective rate amortizes cost over all input and output tokens', (() => {
@@ -278,9 +293,13 @@ check('the effective rate amortizes cost over all input and output tokens', (() 
 check('the effective rate is unavailable when none of the tokens have billing data', (() => {
   const page = renderPage([{ ...sessions[0], provider: 'codex', cost: null,
     usage: { input_tokens: 1000, cached_input_tokens: 800, output_tokens: 30 } }]);
-  const row = page.match(/usage-total[\s\S]*?<\/div>\s*<div class="usage-row usage-provider/)[0];
+  const row = page.match(/usage-total[\s\S]*?<div class="usage-group/)[0];
   return row.includes('title="No billing data for these tokens">—</div>');
 })(), true);
+
+// The usage table's model rows, which come after every provider row.
+const modelRows = page => page.slice(page.indexOf('usage-row usage-model'),
+  page.indexOf('</section>'));
 
 check('empty synthetic and unknown models are omitted', (() => {
   const page = renderPage([{ ...sessions[0], cost: 0, usage: {}, models: {
@@ -289,7 +308,7 @@ check('empty synthetic and unknown models are omitted', (() => {
   return !page.includes('&lt;synthetic&gt;') && !page.includes('Unknown model');
 })(), true);
 
-check('unpriced sessions are excluded consistently from model cost rows', (() => {
+check('unpriced sessions add their tokens to model rows but no cost', (() => {
   const model = { input_tokens: 1000, cached_input_tokens: 800, output_tokens: 10 };
   const page = renderPage([
     { ...sessions[0], provider: 'codex', id: 'priced', cost: 1,
@@ -300,8 +319,9 @@ check('unpriced sessions are excluded consistently from model cost rows', (() =>
         input_tokens: 9000, cached_input_tokens: 8000, output_tokens: 90
       } } }
   ]);
-  const details = page.match(/<details class="usage-models">([\s\S]*?)<\/details>/)[1];
-  return details.includes('>1,000</div>') && !details.includes('>10,000</div>');
+  const rows = modelRows(page);
+  return rows.includes('title="10,000 tokens">10K') &&
+    rows.includes('title="Some costs are unavailable">$1.00');
 })(), true);
 
 check('a model without its own cost gets what the others leave of the session cost', (() => {
@@ -310,39 +330,40 @@ check('a model without its own cost gets what the others leave of the session co
       'gpt-a': { input_tokens: 100, output_tokens: 10, cost: 5 },
       'gpt-b': { input_tokens: 100, output_tokens: 10 }
     } }]);
-  const details = page.match(/<details class="usage-models">([\s\S]*?)<\/details>/)[1];
-  return details.includes('>$5.00</div>') && details.includes('>$3.00</div>');
+  const rows = modelRows(page);
+  return rows.includes('>$5.00</div>') && rows.includes('>$3.00</div>');
 })(), true);
 
-check('the per-model usage breakdown is collapsible', (() => {
+check('a provider row expands into its model rows, without the claude- prefix', (() => {
   const page = renderPage([{ ...sessions[0], model: 'claude-test', cost: 2,
     usage: { input_tokens: 10, output_tokens: 2 },
     models: { 'claude-test': { input_tokens: 10, output_tokens: 2 } } }]);
-  return page.includes('<details class="usage-models">') &&
-    page.includes('<div class="usage-model-grid">') &&
-    page.includes('By model (1)') && page.includes('claude-test');
+  return /<div class="usage-group" role="rowgroup"[^>]*>\s*<div class="usage-row usage-provider claude" role="row" [^>]*tabindex="0" aria-expanded="false">/.test(page) &&
+    /usage-model"[^>]*>\s*<div class="usage-label" role="rowheader">test</.test(page) &&
+    !page.includes('<details');
 })(), true);
 
-check('provider and model headers sort every usage column independently', (() => {
+check('providers with no usage are not listed', (() => {
+  const page = renderPage([{ ...sessions[0], cost: 2,
+    usage: { input_tokens: 10, output_tokens: 2 },
+    models: { 'claude-test': { input_tokens: 10, output_tokens: 2 } } }]);
+  return page.includes('usage-provider claude') && !page.includes('usage-provider codex') &&
+    !page.includes('usage-provider dsh');
+})(), true);
+
+check('the usage header sorts the provider groups and every usage column', (() => {
   const page = renderPage([{ ...sessions[0], model: 'claude-test', cost: 2,
     usage: { input_tokens: 10, output_tokens: 2 },
     models: { 'claude-test': { input_tokens: 10, output_tokens: 2 } } }]);
-  const headers = target => [...page.matchAll(new RegExp(
-    `data-usage-column="(\\d+)" data-usage-target="${target}"`, 'g'
-  ))].map(match => +match[1]);
+  const headers = [...page.matchAll(/data-usage-column="(\d+)"/g)].map(match => +match[1]);
   const rows = [...page.matchAll(
-    /<div class="usage-row usage-(?:provider|model)[^"]*" role="row" ([^>]+)>/g
+    /<div class="usage-(?:group|row usage-(?:provider|model))[^"]*" role="row(?:group)?" ([^>]+)>/g
   )].map(match => match[1]);
-  return JSON.stringify(headers('providers')) === JSON.stringify([...Array(10).keys()]) &&
-    JSON.stringify(headers('models')) === JSON.stringify([...Array(10).keys()]) &&
-    rows.every(attributes => [...Array(10).keys()].every(index =>
+  return JSON.stringify(headers) === JSON.stringify([...Array(10).keys()]) &&
+    rows.length === 3 && rows.every(attributes => [...Array(10).keys()].every(index =>
       attributes.includes(`data-usage-sort${index}=`))) &&
-    page.includes("target === 'providers' ? '.usage-provider' : '.usage-model'") &&
-    page.includes('grid.insertBefore(row, details)');
+    page.includes("document.querySelectorAll('.usage-group')");
 })(), true);
-
-check('model rows use a nested grid instead of making details a subgrid',
-  html.includes('.usage-models {\n    display: grid;'), false);
 
 check('a title with markup in it is escaped', (() => {
   writeSession('-Users-me-buildgit-x', 'xss', [
@@ -385,7 +406,7 @@ check('the script reorders the groups', html.includes('table.append(...sorted)')
 // few characters wide in a narrow window and breaks a path down it.
 check('the path is a full-width row under the figures',
   new RegExp(`<tr class="path">\\s*<td colspan="${
-    ['Session','Last active','Active','Messages','Sub-agents','Size','Cost','']
+    ['Session','Model','Last active','Active','Messages','Sub-agents','Size','Cost','']
       .length - 3}"`).test(html), true);
 
 check('the path row carries the working directory and branch',

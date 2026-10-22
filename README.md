@@ -43,20 +43,19 @@ button. Claude rows report calculated dollar cost; for a signed-in Enterprise
 account, Codex rows report the backend's Enterprise dollar estimate and credit
 consumption; DSH rows report the exact OpenRouter cost of every generation the
 session made.
-Above the session table, an overall usage row and one row per provider report
-estimated cost, Enterprise credits, input and output tokens, net-new input,
-cache writes, cache reads, and the cached share of input-side tokens. A
-collapsible section breaks the same totals down by model. Codex cache writes
+Above the session table, an overall usage row and one row per provider with
+any usage report estimated cost, Enterprise credits, input and output tokens,
+net-new input, cache writes, cache reads, and the cached share of input-side
+tokens. Clicking a provider row expands it into one row per model. Codex cache writes
 use the Enterprise API's exact net-new-input count. When that breakdown is
 unavailable, the input-minus-cache-read fallback is visibly marked `≈`.
 The estimated $/M figure divides cost by input plus output tokens. It is
 the blended, cache-amortized price of processing one million tokens, so cache
 reuse lowers it while costly output and model choice remain reflected in it. An
-effective rate always uses the same billed sessions for both dollars and
-tokens; unpriced sessions remain in overall/provider usage totals but are left
-out of the per-model cost comparison. Every usage column is sortable; the top
-header reorders providers while keeping Total fixed, and the header inside the
-expanded model section sorts models independently.
+effective rate only counts the tokens of billed sessions; unpriced sessions
+still count in the token columns, and leave the cost marked incomplete. Every
+usage column is sortable: the header reorders the providers, each with its
+model rows, and the model rows within each provider, keeping Total fixed.
 Sort by any column to find the session worth looking at: the expensive one, the
 long one, or the one with sub-agents.
 
@@ -84,7 +83,7 @@ Press Ctrl+C to stop.
 
 The page interleaves sessions under `~/.claude/projects/`,
 `~/.codex/sessions/` and `~/.dsh/sessions/`, most recently active first. A row
-carries its provider, title, working directory and branch, last activity, active
+carries its title, the models it used, working directory and branch, last activity, active
 time, message and sub-agent counts, size on disk, and dollar cost. Cost is
 banded so expensive sessions stand out.
 
