@@ -3,6 +3,13 @@
 // snapshot per model response, and the OpenRouter generation id that response
 // was billed under, so tracks carry tokens and dollars as well as what ran.
 
+const {
+  OTHER_CATEGORY, MESSAGES_CATEGORY, SUBAGENTS_CATEGORY, TOOLS_CATEGORY,
+  FAILED_TOOLS_CATEGORY, MODEL_CATEGORY, AGENT_SCHEMAS, createTimelineShared,
+  buildTimelineShared, profileMeta, timeRange, createMarkerTable, addCostGraph, costAtTime,
+  totalCostPoints, transcriptSamples, activitySpans, agentThread
+} = require('./timeline-profile.js');
+
 function timestamp(entry) {
   return Number.isFinite(entry?.time) ? entry.time : null;
 }
@@ -61,7 +68,6 @@ function readTrack(entries) {
   const errors = [];
   const turns = [];
   const openTurns = new Map();
-  let title = null;
 
   for (const entry of entries) {
     const at = timestamp(entry);
@@ -90,6 +96,9 @@ function readTrack(entries) {
       }
       case 'assistant/message': {
         const message = entry.data?.message || {};
+        const responseId = message.source?.replayState?.response?.responseId || null;
+        // A replayed model call is the same generation recorded again.
+        if (responseId && responses.some(response => response.responseId === responseId)) break;
         responses.push({
           at,
           turn: entry.data?.turn,
@@ -97,7 +106,7 @@ function readTrack(entries) {
           model: message.source?.model || config.model || 'unknown',
           effort: config.reasoningEffort || '',
           usage: entry.data?.usage || {},
-          responseId: message.source?.replayState?.response?.responseId || null,
+          responseId,
           blocks: Array.isArray(message.content) ? message.content : []
         });
         break;
@@ -111,12 +120,15 @@ function readTrack(entries) {
         }
         break;
       }
-      case 'tool/call':
-        calls.set(entry.data?.callId || `${entry.data?.turn}:${entry.data?.step}`,
-          { callId: entry.data?.callId || `${entry.data?.turn}:${entry.data?.step}`,
-            at, name: entry.data?.name || 'tool', arguments: entry.data?.arguments || '',
-            turn: entry.data?.turn, step: entry.data?.step, config: { ...config } });
+      case 'tool/call': {
+        // A call without an id can have no result paired to it, but it still
+        // needs a key of its own: a step can make several.
+        const callId = entry.data?.callId || `unpaired-${calls.size}`;
+        calls.set(callId, { callId, at, name: entry.data?.name || 'tool',
+          arguments: entry.data?.arguments || '', turn: entry.data?.turn,
+          step: entry.data?.step, config: { ...config } });
         break;
+      }
       case 'tool/result': {
         const result = toolResultOf(entry);
         if (result.callId) results.set(result.callId, { at, ...result });
@@ -134,13 +146,10 @@ function readTrack(entries) {
         }
         break;
       }
-      case 'session/title':
-        title = entry.data?.title || title;
-        break;
     }
   }
 
-  return { calls, results, responses, userMessages, systemMessages, errors, turns, title };
+  return { calls, results, responses, userMessages, systemMessages, errors, turns };
 }
 
 // The readable transcript that becomes the sample stacks, so the call tree,
@@ -148,21 +157,25 @@ function readTrack(entries) {
 function transcriptEvents(track) {
   const events = [];
   for (const message of track.userMessages) {
-    events.push({ at: message.at, label: 'User', text: message.text, category: 1 });
+    events.push({ at: message.at, label: 'User', text: message.text, category: MESSAGES_CATEGORY });
   }
   for (const message of track.systemMessages) {
-    events.push({ at: message.at, label: 'System', text: message.text, category: 0 });
+    events.push({ at: message.at, label: 'System', text: message.text,
+      category: OTHER_CATEGORY });
   }
   for (const error of track.errors) {
-    events.push({ at: error.at, label: 'Error', text: error.text, category: 4 });
+    events.push({ at: error.at, label: 'Error', text: error.text,
+      category: FAILED_TOOLS_CATEGORY });
   }
   for (const response of track.responses) {
     if (response.at === null) continue;
     const text = textBlocks(response.blocks.filter(block => block?.type === 'text'));
     const reasoning = textBlocks(response.blocks.filter(block => block?.type === 'reasoning'));
-    if (text) events.push({ at: response.at, label: 'DSH', text, category: 1 });
+    if (text) events.push({ at: response.at, label: 'DSH', text,
+      category: MESSAGES_CATEGORY });
     if (reasoning) {
-      events.push({ at: response.at, label: 'Reasoning', text: reasoning, category: 5 });
+      events.push({ at: response.at, label: 'Reasoning', text: reasoning,
+        category: MODEL_CATEGORY });
     }
   }
   for (const call of track.calls.values()) {
@@ -171,159 +184,18 @@ function transcriptEvents(track) {
       .filter(Boolean).join('\n\n');
     if (call.at === null || !text) continue;
     events.push({ at: result?.at ?? call.at, label: call.name, text,
-      category: result?.failed ? 4 : 3 });
+      category: result?.failed ? FAILED_TOOLS_CATEGORY : TOOLS_CATEGORY });
   }
   return events.sort((a, b) => a.at - b.at);
 }
 
-function markerSchemas() {
-  return [
-    { name: 'Text', tooltipLabel: '{marker.name}', tableLabel: '{marker.name}: {marker.data.text}',
-      chartLabel: '{marker.name}', display: ['marker-chart', 'marker-table'],
-      fields: [{ key: 'text', label: 'Content', format: 'string' }] },
-    { name: 'Turn', tooltipLabel: '{marker.name}', tableLabel: '{marker.name}: {marker.data.status}',
-      chartLabel: '{marker.name}', display: ['marker-chart', 'marker-table', 'timeline-overview'],
-      fields: [
-        { key: 'status', label: 'Status', format: 'string' },
-        { key: 'model', label: 'Model', format: 'string' },
-        { key: 'effort', label: 'Effort', format: 'string' }
-      ] },
-    { name: 'Activity', tooltipLabel: '{marker.name}',
-      tableLabel: '{marker.name}: {marker.data.prompt}', chartLabel: '{marker.data.prompt}',
-      display: ['marker-chart', 'marker-table', 'timeline-overview'], fields: [
-        { key: 'prompt', label: 'Prompt', format: 'string' },
-        { key: 'cost', label: 'Cost ($)', format: 'decimal' }
-      ] },
-    { name: 'Intervention', tooltipLabel: '{marker.name}',
-      tableLabel: '{marker.name}: {marker.data.text}', chartLabel: '{marker.name}',
-      display: ['marker-chart', 'marker-table'], fields: [
-        { key: 'text', label: 'Detail', format: 'string' }
-      ] },
-    { name: 'ToolCall', tooltipLabel: '{marker.name}',
-      tableLabel: '{marker.name} — {marker.data.detail}', chartLabel: '{marker.name}',
-      display: ['marker-chart', 'marker-table'], fields: [
-        { key: 'detail', label: 'Input', format: 'string' },
-        { key: 'status', label: 'Status', format: 'string' },
-        { key: 'outputBytes', label: 'Output size', format: 'bytes' }
-      ] },
-    { name: 'Reasoning', tooltipLabel: '{marker.name}', tableLabel: '{marker.data.text}',
-      chartLabel: '{marker.name}', display: ['marker-chart', 'marker-table'],
-      fields: [{ key: 'text', label: 'Summary', format: 'string' }] },
-    { name: 'ModelResponse', tooltipLabel: '{marker.data.model}',
-      tableLabel: '{marker.data.model} ({marker.data.outputTokens} output tokens)',
-      chartLabel: '{marker.data.model}', display: ['marker-chart', 'marker-table'], fields: [
-        { key: 'model', label: 'Model', format: 'string' },
-        { key: 'effort', label: 'Effort', format: 'string' },
-        { key: 'inputTokens', label: 'Context tokens', format: 'integer' },
-        { key: 'cachedInputTokens', label: 'Cached input', format: 'integer' },
-        { key: 'outputTokens', label: 'Output tokens', format: 'integer' },
-        { key: 'reasoningTokens', label: 'Reasoning tokens', format: 'integer' }
-      ] },
-    { name: 'ContextSize', tooltipLabel: '{marker.name}', display: [], fields: [
-        { key: 'tokens', label: 'Context Size', format: 'integer' },
-        { key: 'cachedTokens', label: 'Cached input', format: 'integer' },
-        { key: 'uncachedTokens', label: 'Uncached input', format: 'integer' }
-      ], graphs: [
-        { key: 'tokens', color: 'blue', type: 'bar' },
-        { key: 'cachedTokens', color: 'green', type: 'bar' }
-      ] },
-    { name: 'OutputTokens', tooltipLabel: '{marker.name}', display: [], fields: [
-        { key: 'tokens', label: 'Output Tokens', format: 'integer' },
-        { key: 'reasoningTokens', label: 'Reasoning Tokens', format: 'integer' }
-      ], graphs: [
-        { key: 'tokens', color: 'purple', type: 'bar' },
-        { key: 'reasoningTokens', color: 'orange', type: 'bar' }
-      ] },
-    { name: 'Usage', tooltipLabel: '{marker.name}', tableLabel: '{marker.name}',
-      display: ['marker-table'], fields: [
-        { key: 'totalTokens', label: 'Total tokens', format: 'integer' },
-        { key: 'inputTokens', label: 'Input tokens', format: 'integer' },
-        { key: 'cachedTokens', label: 'Cached input', format: 'integer' },
-        { key: 'outputTokens', label: 'Output tokens', format: 'integer' },
-        { key: 'cost', label: 'Cost ($)', format: 'decimal' }
-      ] },
-    { name: 'ThreadCost', tooltipLabel: '{marker.name}',
-      tableLabel: '{marker.name}: ${marker.data.cost}', display: [], fields: [
-        { key: 'cost', label: 'Thread cost ($)', format: 'decimal' }
-      ], graphs: [{ key: 'cost', color: 'blue', type: 'line' }] },
-    { name: 'ResponseCost', tooltipLabel: '{marker.name}',
-      tableLabel: '{marker.name}: ${marker.data.cost}', display: [], fields: [
-        { key: 'cost', label: 'Response cost ($)', format: 'decimal' },
-        { key: 'inputTokens', label: 'Context tokens', format: 'integer' },
-        { key: 'cachedInputTokens', label: 'Cached input', format: 'integer' },
-        { key: 'outputTokens', label: 'Output tokens', format: 'integer' }
-      ], graphs: [{ key: 'cost', color: 'orange', type: 'bar' }] },
-    { name: 'TotalCost', tooltipLabel: '{marker.name}',
-      tableLabel: '{marker.name}: ${marker.data.cost}', display: [], fields: [
-        { key: 'cost', label: 'Total cost ($)', format: 'decimal' }
-      ], graphs: [{ key: 'cost', color: 'purple', type: 'line' }] },
-    { name: 'Subagent', tooltipLabel: '{marker.data.title}', tableLabel: '{marker.data.title}',
-      chartLabel: '{marker.name}', display: ['marker-chart', 'marker-table'], fields: [
-        { key: 'title', label: 'Session', format: 'string' },
-        { key: 'threadId', label: 'Session id', format: 'string' }
-      ] }
-  ];
-}
-
-const CATEGORIES = [
-  { name: 'Other', color: 'grey', subcategories: ['Other'] },
-  { name: 'Messages', color: 'blue', subcategories: ['Other'] },
-  { name: 'Subagents', color: 'yellow', subcategories: ['Other'] },
-  { name: 'Tools', color: 'green', subcategories: ['Other'] },
-  { name: 'Failed tools', color: 'red', subcategories: ['Other'] },
-  { name: 'Model', color: 'purple', subcategories: ['Other'] },
-  { name: 'Idle', color: 'transparent', subcategories: ['Other'] }
-];
-
-function createShared(strings, intern) {
-  const shared = {
-    stackTable: { length: 0, prefix: [], frame: [] },
-    frameTable: { length: 0, address: [], inlineDepth: [], category: [], subcategory: [],
-      func: [], nativeSymbol: [], innerWindowID: [], originalLocation: [], line: [], column: [] },
-    funcTable: { length: 0, name: [], isJS: [], relevantForJS: [], resource: [], source: [],
-      lineNumber: [], columnNumber: [], originalLocation: [] },
-    resourceTable: { length: 0, lib: [], name: [], host: [], type: [] },
-    nativeSymbols: { length: 0, address: [], functionSize: [], libIndex: [], name: [] },
-    sources: { length: 0, id: [], filename: [], startLine: [], startColumn: [],
-      sourceMapURL: [], content: [] },
-    sourceLocationTable: { source: [], line: [], column: [], length: 0 },
-    funcIndexes: new Map(), frameIndexes: new Map(), stackIndexes: new Map()
-  };
-  shared.registerSource = (name, content) => {
-    const source = shared.sources.length++;
-    shared.sources.id.push(null); shared.sources.filename.push(intern(name));
-    shared.sources.startLine.push(1); shared.sources.startColumn.push(1);
-    shared.sources.sourceMapURL.push(null); shared.sources.content.push(content);
-    const resource = shared.resourceTable.length++;
-    shared.resourceTable.lib.push(null); shared.resourceTable.name.push(intern(name));
-    shared.resourceTable.host.push(null); shared.resourceTable.type.push(5);
-    return { source, resource };
-  };
-  shared.finish = () => ({ stringArray: strings, stackTable: shared.stackTable,
-    frameTable: shared.frameTable, funcTable: shared.funcTable,
-    resourceTable: shared.resourceTable, nativeSymbols: shared.nativeSymbols,
-    sources: shared.sources, sourceLocationTable: shared.sourceLocationTable });
-  return shared;
-}
-
 function createDshProfile(tree, billing) {
   if (!tree?.length) throw new Error('No DSH session found');
-  if (!(billing instanceof Map)) throw new Error('DSH billing data is required');
-
-  const allTimes = tree.flatMap(({ entries }) =>
-    entries.map(entry => timestamp(entry))).filter(time => time !== null);
-  if (!allTimes.length) throw new Error('No timestamped events found in DSH session');
-  const startTime = Math.min(...allTimes);
-  const profileEnd = Math.max(...allTimes);
-
-  const strings = [];
-  const stringMap = new Map();
-  const intern = value => {
-    const text = String(value);
-    if (!stringMap.has(text)) { stringMap.set(text, strings.length); strings.push(text); }
-    return stringMap.get(text);
-  };
-  const shared = createShared(strings, intern);
+  const ranges = tree.map(({ entries }) => timeRange(entries, timestamp)).filter(Boolean);
+  if (!ranges.length) throw new Error('No timestamped events found in DSH session');
+  const startTime = Math.min(...ranges.map(range => range.start));
+  const profileEnd = Math.max(...ranges.map(range => range.end));
+  const shared = createTimelineShared();
 
   const tracks = [...tree].sort((a, b) => {
     if (!a.session.parentId) return -1;
@@ -337,14 +209,14 @@ function createDshProfile(tree, billing) {
     return row ? row.cost : null;
   };
 
-  // Cumulative dollars over each track, and the sum of those deltas for the
-  // root's session-wide total. A generation the API did not return contributes
-  // nothing rather than a fabricated zero.
+  // Cumulative dollars over each track. A generation the API did not return
+  // contributes nothing rather than a fabricated zero, and leaves the track
+  // without a cost graph.
   const trackData = tracks.map(({ session, entries }) => {
     const track = readTrack(entries);
-    const times = entries.map(entry => timestamp(entry)).filter(time => time !== null);
-    const trackStart = Math.min(...times);
-    const trackEnd = Math.max(...times);
+    // A track with no timestamped record of its own spans the whole profile.
+    const { start: trackStart, end: trackEnd } =
+      timeRange(entries, timestamp) || { start: startTime, end: profileEnd };
     const responses = track.responses.filter(response => response.at !== null)
       .sort((a, b) => a.at - b.at);
 
@@ -360,114 +232,35 @@ function createDshProfile(tree, billing) {
       }
     }
 
-    return { session, entries, track, trackStart, trackEnd, responses, costPoints,
-      costKnown: known, cost: known ? cumulative : null };
+    return { session, track, trackStart, trackEnd, responses,
+      costPoints: known ? costPoints : null, cost: known ? cumulative : null };
   });
 
-  const totalDeltas = [];
-  for (const data of trackData) {
-    if (!data.costKnown) continue;
-    let previous = 0;
-    for (const point of data.costPoints) {
-      totalDeltas.push({ at: point.at, cost: point.cost - previous });
-      previous = point.cost;
-    }
-  }
-  totalDeltas.sort((a, b) => a.at - b.at);
-  let totalCost = 0;
-  const totalPoints = totalDeltas.map(point => {
-    totalCost += point.cost;
-    return { at: point.at, cost: totalCost };
-  });
   // A session-wide figure is only honest when every track was billed; a
   // partial total would read as cheaper than the session was.
-  const totalKnown = trackData.every(data => data.costKnown);
+  const totalPoints = trackData.every(data => data.costPoints) &&
+    totalCostPoints(trackData.map(data => data.costPoints));
 
   const threads = trackData.map((data, index) => {
-    const { session, entries, track, trackStart, trackEnd, responses, costPoints } = data;
-    const markers = { data: [], name: [], startTime: [], endTime: [], phase: [],
-      category: [], length: 0 };
-    const add = (name, start, end, category, markerData) => {
-      markers.name.push(intern(name));
-      markers.startTime.push(Math.max(0, start - startTime));
-      markers.endTime.push(Math.max(0, end - startTime));
-      markers.phase.push(start === end ? 0 : 1);
-      markers.category.push(category);
-      markers.data.push(markerData);
-      markers.length++;
-    };
-    const addCostGraph = (points, name, type, end) => {
-      points.forEach((point, pointIndex) => add(name, point.at,
-        points[pointIndex + 1]?.at ?? end, 0, { type, cost: point.cost }));
-    };
-    const costAt = time => [...costPoints].reverse()
-      .find(point => point.at <= time)?.cost || 0;
+    const { session, track, trackStart, trackEnd, responses, costPoints } = data;
+    const { markers, add } = createMarkerTable(shared, startTime);
+    const costAt = costPoints && costAtTime(costPoints);
 
     const transcript = transcriptEvents(track);
-    const document = [`# ${session.title}`, `# ${session.cwd || 'DSH'}`, ''];
-    for (const event of transcript) {
-      event.line = document.length + 1;
-      document.push(`[${new Date(event.at).toISOString()}] ${event.label}`);
-      document.push(...event.text.split('\n'), '');
-    }
-    const slug = session.id.replace(/[^A-Za-z0-9-]/g, '').slice(0, 60) || `session-${index}`;
-    const sourceInfo = shared.registerSource(`${slug}.transcript.txt`, document.join('\n'));
-    const addStack = (name, category, line, prefix = null) => {
-      const funcKey = `${sourceInfo.source}\0${name}\0${line || 0}`;
-      let func = shared.funcIndexes.get(funcKey);
-      if (func === undefined) {
-        func = shared.funcTable.length++;
-        shared.funcIndexes.set(funcKey, func);
-        shared.funcTable.name.push(intern(name)); shared.funcTable.isJS.push(false);
-        shared.funcTable.relevantForJS.push(false); shared.funcTable.resource.push(sourceInfo.resource);
-        shared.funcTable.source.push(sourceInfo.source); shared.funcTable.lineNumber.push(null);
-        shared.funcTable.columnNumber.push(null); shared.funcTable.originalLocation.push(null);
-      }
-      const frameKey = `${func}\0${category}\0${line || 0}`;
-      let frame = shared.frameIndexes.get(frameKey);
-      if (frame === undefined) {
-        frame = shared.frameTable.length++;
-        shared.frameIndexes.set(frameKey, frame);
-        shared.frameTable.address.push(-1); shared.frameTable.inlineDepth.push(0);
-        shared.frameTable.category.push(category); shared.frameTable.subcategory.push(0);
-        shared.frameTable.func.push(func); shared.frameTable.nativeSymbol.push(null);
-        shared.frameTable.innerWindowID.push(0); shared.frameTable.originalLocation.push(null);
-        shared.frameTable.line.push(line || null); shared.frameTable.column.push(null);
-      }
-      const stackKey = `${prefix ?? 'root'}\0${frame}`;
-      let stack = shared.stackIndexes.get(stackKey);
-      if (stack === undefined) {
-        stack = shared.stackTable.length++;
-        shared.stackIndexes.set(stackKey, stack);
-        shared.stackTable.prefix.push(prefix); shared.stackTable.frame.push(frame);
-      }
-      return stack;
-    };
-    const rootStack = addStack('DSH context', 0, null);
-    const sampleRows = transcript.map(event => ({
-      time: event.at - startTime,
-      stack: addStack(event.label, event.category, event.line, rootStack),
-      weight: Buffer.byteLength(event.text, 'utf8')
-    }));
-    const idleStack = addStack('Idle', 6, null);
-    for (let sampleIndex = 1; sampleIndex < transcript.length; sampleIndex++) {
-      const before = transcript[sampleIndex - 1].at;
-      const after = transcript[sampleIndex].at;
-      if (after - before > 60000) {
-        sampleRows.push({ time: before - startTime + 1, stack: idleStack, weight: 0 });
-        sampleRows.push({ time: after - startTime - 1, stack: idleStack, weight: 0 });
-      }
-    }
-    sampleRows.sort((a, b) => a.time - b.time);
+    const samples = transcriptSamples(shared, transcript, {
+      title: session.title, subtitle: session.cwd || 'DSH', rootName: 'DSH context', startTime,
+      slug: session.id.replace(/[^A-Za-z0-9-]/g, '').slice(0, 60) || `session-${index}`
+    });
 
     for (const message of track.userMessages) {
-      add('User', message.at, message.at, 1, { type: 'Text', text: message.text });
+      add('User', message.at, message.at, MESSAGES_CATEGORY, { type: 'Text', text: message.text });
     }
     for (const message of track.systemMessages) {
-      add('System', message.at, message.at, 0, { type: 'Text', text: message.text });
+      add('System', message.at, message.at, OTHER_CATEGORY, { type: 'Text', text: message.text });
     }
     for (const error of track.errors) {
-      add('Error', error.at, error.at, 4, { type: 'Intervention', text: error.text });
+      add('Error', error.at, error.at, FAILED_TOOLS_CATEGORY,
+        { type: 'Intervention', kind: 'Error', text: error.text });
     }
 
     // Tool spans: the call is the start, its result the end. A call still
@@ -477,8 +270,9 @@ function createDshProfile(tree, billing) {
       const result = track.results.get(callId);
       const end = result?.at ?? call.at;
       const output = result?.text || '';
-      add(call.name, call.at, end, result?.failed ? 4 : 3, {
+      add(call.name, call.at, end, result?.failed ? FAILED_TOOLS_CATEGORY : TOOLS_CATEGORY, {
         type: 'ToolCall',
+        name: call.name,
         detail: toolDetail(call.name, call.arguments),
         status: result ? (result.failed ? 'error' : 'complete') : 'pending',
         outputBytes: Buffer.byteLength(output, 'utf8')
@@ -494,107 +288,84 @@ function createDshProfile(tree, billing) {
       const begin = Math.max(trackStart, turnStart.get(response.turn) ?? previousResponse);
       previousResponse = response.at;
       const usage = response.usage;
+      // DSH's inputTokens excludes cache reads; the context is both.
+      const contextTokens = (usage.inputTokens || 0) + (usage.cacheReadTokens || 0);
       const text = textBlocks(response.blocks.filter(block => block?.type === 'text'));
       const reasoning = textBlocks(response.blocks.filter(block => block?.type === 'reasoning'));
-      if (text) add('DSH', response.at, response.at, 1, { type: 'Text', text });
+      if (text) add('DSH', response.at, response.at, MESSAGES_CATEGORY, { type: 'Text', text });
       if (reasoning) {
-        add('Reasoning', begin, response.at, 5, { type: 'Reasoning', text: reasoning });
+        add('Reasoning', begin, response.at, MODEL_CATEGORY, { type: 'Reasoning', text: reasoning });
       }
-      add(response.model, begin, response.at, 5, {
+      add(response.model, begin, response.at, MODEL_CATEGORY, {
         type: 'ModelResponse', model: response.model, effort: response.effort,
-        inputTokens: usage.inputTokens || 0,
+        inputTokens: contextTokens,
         cachedInputTokens: usage.cacheReadTokens || 0,
         outputTokens: usage.outputTokens || 0,
         reasoningTokens: usage.reasoningTokens || 0
       });
-      add('Context Size', response.at, next, 1, { type: 'ContextSize',
-        tokens: (usage.inputTokens || 0) + (usage.cacheReadTokens || 0),
+      add('Context Size', response.at, next, MESSAGES_CATEGORY, { type: 'ContextSize',
+        tokens: contextTokens,
         cachedTokens: usage.cacheReadTokens || 0,
         uncachedTokens: usage.inputTokens || 0 });
-      add('Output Tokens', begin, response.at, 5, { type: 'OutputTokens',
+      add('Output Tokens', begin, response.at, MODEL_CATEGORY, { type: 'OutputTokens',
         tokens: usage.outputTokens || 0,
         reasoningTokens: usage.reasoningTokens || 0 });
       const cost = costOf(response);
       if (cost !== null) {
-        add('Response Cost ($)', begin, response.at, 5, { type: 'ResponseCost',
-          cost, inputTokens: usage.inputTokens || 0,
+        add('Response Cost ($)', begin, response.at, MODEL_CATEGORY, { type: 'ResponseCost',
+          cost, inputTokens: contextTokens,
           cachedInputTokens: usage.cacheReadTokens || 0,
           outputTokens: usage.outputTokens || 0 });
       }
     });
 
     for (const turn of track.turns) {
-      add('Turn', turn.start, Math.max(turn.start + 1, turn.end), 5, { type: 'Turn',
+      add('Turn', turn.start, Math.max(turn.start + 1, turn.end), MODEL_CATEGORY, { type: 'Turn',
         status: turn.reason, model: turn.config.model || session.model || 'unknown',
         effort: turn.config.reasoningEffort || 'unknown' });
+    }
+
+    // The overview: DSH's turns, or for a session with no explicit turn
+    // records, work separated by less than a minute, as the Codex profile does.
+    const spans = track.turns.length ? track.turns : activitySpans(transcript);
+    for (const span of spans) {
       const prompt = transcript.find(event =>
-        event.label === 'User' && event.at >= turn.start && event.at <= turn.end)?.text || '';
-      add('Activity', turn.start, Math.max(turn.start + 1, turn.end), 1, {
+        event.label === 'User' && event.at >= span.start && event.at <= span.end)?.text || '';
+      add('Activity', span.start, Math.max(span.start + 1, span.end), MESSAGES_CATEGORY, {
         type: 'Activity', prompt: prompt.replace(/\s+/g, ' ').slice(0, 300),
-        cost: Math.max(0, costAt(turn.end) - costAt(turn.start))
+        cost: costAt && Math.max(0, costAt(span.end) - costAt(span.start))
       });
     }
 
-    // Fallback overview for a session with no explicit turn records: group
-    // work separated by less than a minute, as the Codex profile does.
-    if (track.turns.length === 0 && transcript.length > 0) {
-      const spans = [];
-      for (const event of transcript) {
-        const previous = spans.at(-1);
-        if (!previous || event.at - previous.end > 60000) {
-          spans.push({ start: event.at, end: event.at, events: [event] });
-        } else {
-          previous.end = event.at;
-          previous.events.push(event);
-        }
-      }
-      for (const span of spans) {
-        const prompt = span.events.find(event => event.label === 'User')?.text || '';
-        add('Activity', span.start, Math.max(span.start + 1, span.end), 1, {
-          type: 'Activity', prompt: prompt.replace(/\s+/g, ' ').slice(0, 300),
-          cost: Math.max(0, costAt(span.end) - costAt(span.start))
-        });
-      }
-    }
-
-    for (const child of tracks.filter(candidate =>
+    for (const child of trackData.filter(candidate =>
       candidate.session.parentId === session.id)) {
       const childStart = Date.parse(child.session.started) || trackStart;
       const childEnd = Date.parse(child.session.ended) || childStart;
-      add('Subagent', childStart, childEnd, 2, { type: 'Subagent',
-        title: child.session.title, threadId: child.session.id });
+      add('Subagent', childStart, childEnd, SUBAGENTS_CATEGORY, { type: 'Subagent',
+        agentType: 'agent', description: child.session.title, agentId: child.session.id,
+        cost: child.cost ?? undefined });
     }
 
     const usage = session.usage || {};
-    add('Usage', trackEnd, trackEnd, 0, { type: 'Usage',
+    add('Usage', trackEnd, trackEnd, OTHER_CATEGORY, { type: 'Usage',
       totalTokens: usage.totalTokens || 0,
       inputTokens: usage.inputTokens || 0,
       cachedTokens: usage.cacheReadTokens || 0,
       outputTokens: usage.outputTokens || 0,
-      cost: data.cost });
-    if (data.costKnown) addCostGraph(costPoints, 'Thread Cost ($)', 'ThreadCost', trackEnd);
-    if (data.costKnown && index === 0 && totalKnown) {
-      addCostGraph(totalPoints, 'Total Cost ($)', 'TotalCost', profileEnd);
+      cost: data.cost ?? undefined });
+    if (costPoints) addCostGraph(add, costPoints, 'Thread Cost ($)', 'ThreadCost', trackEnd);
+    if (index === 0 && totalPoints) {
+      addCostGraph(add, totalPoints, 'Total Cost ($)', 'TotalCost', profileEnd);
     }
 
-    return {
-      processType: 'default', processName: session.cwd || 'DSH',
-      processStartupTime: trackStart - startTime,
-      processShutdownTime: (index === 0 ? profileEnd : trackEnd) - startTime,
-      registerTime: trackStart - startTime,
-      unregisterTime: (index === 0 ? profileEnd : trackEnd) - startTime,
-      pausedRanges: [], showMarkersInTimeline: true, name: session.title,
-      isMainThread: true, pid: index, tid: index,
-      samples: { length: sampleRows.length, stack: sampleRows.map(row => row.stack),
-        time: sampleRows.map(row => row.time), weight: sampleRows.map(row => row.weight),
-        weightType: 'bytes' }, markers
-    };
+    return agentThread({ session, processName: session.cwd || 'DSH', index, trackStart,
+      trackEnd, profileEnd, startTime, samples, markers });
   });
 
-  return { meta: { processType: 0, product: 'DSH', stackwalk: 0, version: 64,
-    preprocessedProfileVersion: 64, symbolicationNotSupported: true, interval: 1,
-    startTime, profilingStartTime: 0, markerSchema: markerSchemas(), categories: CATEGORIES,
-    usesOnlyOneStackType: true }, libs: [], threads, shared: shared.finish(), counters: [] };
+  return {
+    meta: profileMeta({ product: 'DSH', startTime, markerSchema: AGENT_SCHEMAS }),
+    libs: [], threads, shared: buildTimelineShared(shared), counters: []
+  };
 }
 
 module.exports = { createDshProfile };

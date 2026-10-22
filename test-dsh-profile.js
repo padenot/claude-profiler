@@ -87,7 +87,8 @@ const responseCosts = profile.threads[0].markers.data
 assert.strictEqual(threadCosts.at(-1).cost, 1);
 assert.strictEqual(totalCosts.at(-1).cost, 1.25);
 assert.strictEqual(responseCosts.reduce((sum, marker) => sum + marker.cost, 0), 1);
-assert.strictEqual(responseCosts[0].inputTokens, 80);
+// DSH's inputTokens excludes cache reads; the context tokens include them.
+assert.strictEqual(responseCosts[0].inputTokens, 130);
 
 const tool = profile.threads[0].markers.data.find(marker => marker.type === 'ToolCall');
 assert.deepStrictEqual([tool.status, tool.detail], ['complete', 'git status']);
@@ -120,7 +121,34 @@ assert.strictEqual(unknown.threads[0].markers.data
 assert.strictEqual(unknown.threads[1].markers.data
   .filter(marker => marker.type === 'ThreadCost').length, 0);
 assert.strictEqual(unknown.threads[1].markers.data
-  .find(marker => marker.type === 'Usage').cost, null);
+  .find(marker => marker.type === 'Usage').cost, undefined);
 
+const subagent = profile.threads[0].markers.data.find(marker => marker.type === 'Subagent');
+assert.deepStrictEqual([subagent.agentType, subagent.description, subagent.cost],
+  ['agent', 'Search agent', 0.25]);
 console.log('ok   builds DSH turns, tools, usage, cost graphs, and subagent tracks');
+
+// A replayed generation is recorded twice but is one response, billed once.
+const replayed = createDshProfile([{ session: tree[1].session,
+  entries: [tree[1].entries[0], { ...tree[1].entries[0], seq: 800, time: base + 800 }] }],
+billing);
+const replayedData = replayed.threads[0].markers.data;
+assert.strictEqual(replayedData.filter(marker => marker.type === 'ModelResponse').length, 1);
+assert.strictEqual(replayedData.filter(marker => marker.type === 'ThreadCost').at(-1).cost, 0.25);
+console.log('ok   a replayed generation counts once');
+
+// Calls without an id are kept apart rather than overwriting each other.
+const unpaired = createDshProfile([{ session: tree[1].session, entries: [
+  entry(100, 'tool/call', { turn: 1, step: 1, name: 'bash', arguments: '{"command":"a"}' }),
+  entry(200, 'tool/call', { turn: 1, step: 1, name: 'bash', arguments: '{"command":"b"}' })
+] }], billing);
+assert.deepStrictEqual(unpaired.threads[0].markers.data
+  .filter(marker => marker.type === 'ToolCall').map(marker => marker.detail), ['a', 'b']);
+console.log('ok   tool calls without an id are not merged');
+
+const untimed = createDshProfile([tree[0], { session: session('session-quiet', 'session-root',
+  0, 'Quiet', childUsage), entries: [{ type: 'session', id: 'session-quiet' }] }], billing);
+assert.deepStrictEqual([untimed.threads[1].registerTime, untimed.threads[1].unregisterTime],
+  [0, 1500]);
+console.log('ok   a track with no timestamps spans the whole profile');
 console.log('\nall passed');
