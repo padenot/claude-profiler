@@ -7,7 +7,7 @@ const path = require('path');
 const { spawn } = require('child_process');
 // Attribution of a message's bytes, shared with the size profile so both tools
 // build the same stacks.
-const { attributeEntry, contextChain, calibrate } = require('./context-size.js');
+const { attributeEntry, calibrate } = require('./context-size.js');
 const { renderTranscript } = require('./transcript.js');
 const {
   readJsonlFile: readSessionJsonl, byLastActive, promptTitle
@@ -274,8 +274,9 @@ function costGraphs() {
 // Naively that is O(calls × window), and 10 seconds on a long session. But a
 // call's context is the previous call's context plus whatever has happened
 // since, so the totals are accumulated as the conversation goes and each
-// message is attributed once. A compaction is the exception: it drops what came
-// before, so the running totals start again from that call's own chain.
+// message is walked to and attributed once. A compaction is the exception: it
+// drops what came before, so the running totals start again from that call's
+// own chain.
 const CONTEXT_PARTS = [
   // The system prompt and the tool schemas, which are in the window but never
   // in the log. Its size is inferred, so it goes at the bottom where it is
@@ -322,29 +323,31 @@ function contextBreakdowns(entries, apiCalls) {
     return attributed.get(entry.uuid);
   }
 
-  let counted = new Set();
+  // A call's chain contains the previous call's chain exactly when it reaches
+  // the previous call's message: past that point the two walks are the same.
+  // So only the part above it is new. A chain that never reaches it was cut by
+  // a compaction, and its walk, having gone all the way, is the whole window.
+  let previous = null;
   let running = {};
   return apiCalls.map((call) => {
-    const chain = contextChain(call.msg, byUuid, boundaries);
-    const window = new Set(chain.map(entry => entry.uuid));
-
-    // Anything that was in the window and is not any more means the
-    // conversation was compacted, and the totals no longer describe it.
-    let compacted = false;
-    for (const uuid of counted) {
-      if (!window.has(uuid)) {
-        compacted = true;
+    const fresh = [];
+    const seen = new Set();
+    let reached = false;
+    let current = call.msg;
+    while (current && !seen.has(current.uuid)) {
+      if (current === previous) {
+        reached = true;
         break;
       }
+      seen.add(current.uuid);
+      fresh.push(current);
+      if (boundaries.has(current.uuid)) break;
+      current = current.parentUuid ? byUuid.get(current.parentUuid) : null;
     }
-    if (compacted) {
-      counted = new Set();
-      running = {};
-    }
+    if (!reached) running = {};
+    previous = call.msg;
 
-    for (const entry of chain) {
-      if (counted.has(entry.uuid)) continue;
-      counted.add(entry.uuid);
+    for (const entry of fresh) {
       const bytes = bytesOf(entry);
       for (const category of Object.keys(bytes)) {
         running[category] = (running[category] || 0) + bytes[category];
